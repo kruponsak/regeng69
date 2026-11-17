@@ -9,7 +9,6 @@ import {
   DEFAULT_CATEGORY_GROUPS,
   DEFAULT_SITE_SETTINGS,
   RegistrationRecord,
-  SheetLinkEntry,
   SiteSettings,
   StudentEntry,
   UserAccount,
@@ -28,7 +27,6 @@ export const CATEGORY_GROUPS_ROW_ID = '__CATEGORY_GROUPS__';
 export const SITE_SETTINGS_ROW_ID = '__SITE_SETTINGS__';
 export const GAS_URL_ROW_ID = '__GAS_URL__';
 export const ACTIVE_SHEET_LINK_ROW_ID = '__ACTIVE_SHEET_LINK__';
-export const SHEET_LINKS_ROW_ID = '__SHEET_LINKS__';
 export const LOG_ROW_PREFIX = '__LOG__';
 export const LOG_ROW_MARKER = '__LOG__';
 
@@ -49,7 +47,6 @@ export interface SheetDatabaseState {
   logs: ActivityLogEntry[];
   discoveredGasUrl?: string;
   activeSheetLink?: ActiveSheetConfig | null;
-  sheetLinks?: SheetLinkEntry[];
   spreadsheetId?: string;
   spreadsheetTitle?: string;
   sheets?: string[];
@@ -154,19 +151,6 @@ export function serializeActiveSheetLinkRow(config: ActiveSheetConfig): string[]
     '',
     '',
     new Date(config.lastActivatedAt || Date.now()).toISOString(),
-  ];
-}
-
-export function serializeSheetLinksRow(links: SheetLinkEntry[]): string[] {
-  return [
-    SHEET_LINKS_ROW_ID,
-    '__CONFIG__',
-    '',
-    JSON.stringify(links),
-    '',
-    '',
-    '',
-    new Date().toISOString(),
   ];
 }
 
@@ -286,41 +270,6 @@ function parseActiveSheetLink(rows: any[][]): ActiveSheetConfig | null {
     };
   } catch {
     return null;
-  }
-}
-
-function parseSheetLinks(rows: any[][]): SheetLinkEntry[] {
-  if (!Array.isArray(rows) || rows.length <= 1) return [];
-  const configRow = rows
-    .slice(1)
-    .find((row) => String(row[0] || '') === SHEET_LINKS_ROW_ID);
-  if (!configRow || !configRow[3]) return [];
-  try {
-    const parsed = JSON.parse(String(configRow[3]));
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item: any): SheetLinkEntry | null => {
-        if (!item || typeof item !== 'object') return null;
-        const spreadsheetId = extractSpreadsheetId(
-          String(item.spreadsheetId || item.sheetUrl || '')
-        );
-        const gasUrl = isValidAppsScriptUrl(String(item.gasUrl || ''))
-          ? String(item.gasUrl).trim()
-          : '';
-        if (!spreadsheetId && !gasUrl) return null;
-        return {
-          id: String(item.id || spreadsheetId || gasUrl),
-          label: String(item.label || '').trim(),
-          spreadsheetId,
-          sheetUrl: spreadsheetId ? buildGoogleSheetUrl(spreadsheetId) : '',
-          gasUrl,
-          lastActivatedAt: Number(item.lastActivatedAt) || 0,
-        };
-      })
-      .filter((x): x is SheetLinkEntry => x !== null)
-      .sort((a, b) => b.lastActivatedAt - a.lastActivatedAt);
-  } catch {
-    return [];
   }
 }
 
@@ -586,12 +535,11 @@ export async function fetchAllFromAppsScript(
   // Use simple GET first (fastest and avoids POST redirect quirks on initial connect)
   let json = await callAppsScriptGet(gasUrl, params);
 
-  // If caller explicitly targeted a different spreadsheetId and Apps Script returned a mismatched spreadsheetId,
-  // reject so caller can fall back to direct public CSV read for the target sheet.
   if (
     targetSpreadsheetId &&
-    json.spreadsheetId &&
-    String(json.spreadsheetId).trim() !== targetSpreadsheetId.trim()
+    ((json.spreadsheetId &&
+      String(json.spreadsheetId).trim() !== targetSpreadsheetId.trim()) ||
+      (!json.spreadsheetId && targetSpreadsheetId.trim() !== DEFAULT_SPREADSHEET_ID))
   ) {
     throw new Error('APPS_SCRIPT_SPREADSHEET_MISMATCH');
   }
@@ -629,7 +577,6 @@ export async function fetchAllFromAppsScript(
   const logs = parseActivityLogs(compRawRows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRawRows);
   const activeSheetLink = parseActiveSheetLink(compRawRows);
-  const sheetLinks = parseSheetLinks(compRawRows);
   const registrations = parseRegistrations(json.data?.['ลงทะเบียน'] || []);
 
   // Ensure default admin account always exists in memory
@@ -647,7 +594,6 @@ export async function fetchAllFromAppsScript(
     logs,
     discoveredGasUrl,
     activeSheetLink,
-    sheetLinks,
     spreadsheetId: String(json.spreadsheetId || targetSpreadsheetId || '').trim() || undefined,
     spreadsheetTitle: json.spreadsheetTitle,
     sheets: json.sheets || [],
@@ -753,7 +699,6 @@ export async function fetchAllFromPublicSheetCsv(
   const logs = parseActivityLogs(compRes.rows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRes.rows);
   const activeSheetLink = parseActiveSheetLink(compRes.rows);
-  const sheetLinks = parseSheetLinks(compRes.rows);
   const registrations = parseRegistrations(regRes.rows);
 
   const hasAdmin = users.some((u) => u.username === 'admin' && u.role === 'admin');
@@ -775,7 +720,6 @@ export async function fetchAllFromPublicSheetCsv(
     logs,
     discoveredGasUrl,
     activeSheetLink,
-    sheetLinks,
     spreadsheetId: cleanId,
     spreadsheetTitle: 'Google Sheets (ซิงค์อัตโนมัติ)',
     sheets,
@@ -950,12 +894,7 @@ function doPost(e) {
   }
 }`;
 
-export interface ServerSheetConfigResponse {
-  activeSheetConfig: ActiveSheetConfig | null;
-  sheetLinks: SheetLinkEntry[];
-}
-
-export async function fetchServerSheetConfig(): Promise<ServerSheetConfigResponse | null> {
+export async function fetchServerSheetConfig(): Promise<ActiveSheetConfig | null> {
   try {
     const res = await fetch(`/api/sheet-config?_t=${Date.now()}`, {
       method: 'GET',
@@ -964,42 +903,25 @@ export async function fetchServerSheetConfig(): Promise<ServerSheetConfigRespons
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || !json.ok || !json.activeSheetConfig) return null;
-    return {
-      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
-      sheetLinks: Array.isArray(json.sheetLinks)
-        ? (json.sheetLinks as SheetLinkEntry[])
-        : [],
-    };
+    return json.activeSheetConfig as ActiveSheetConfig;
   } catch {
     return null;
   }
 }
 
 export async function saveServerSheetConfig(
-  activeSheetConfig: ActiveSheetConfig,
-  sheetLinks: SheetLinkEntry[],
-  options?: { forceReplace?: boolean; replaceLinks?: boolean }
-): Promise<ServerSheetConfigResponse | null> {
+  activeSheetConfig: ActiveSheetConfig
+): Promise<ActiveSheetConfig | null> {
   try {
     const res = await fetch('/api/sheet-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        activeSheetConfig,
-        sheetLinks,
-        forceReplace: Boolean(options?.forceReplace),
-        replaceLinks: Boolean(options?.replaceLinks),
-      }),
+      body: JSON.stringify({ activeSheetConfig }),
     });
     if (!res.ok) return null;
     const json = await res.json();
-    if (!json || !json.ok) return null;
-    return {
-      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
-      sheetLinks: Array.isArray(json.sheetLinks)
-        ? (json.sheetLinks as SheetLinkEntry[])
-        : [],
-    };
+    if (!json || !json.ok || !json.activeSheetConfig) return null;
+    return json.activeSheetConfig as ActiveSheetConfig;
   } catch {
     return null;
   }

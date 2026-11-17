@@ -144,15 +144,6 @@ export interface ActivityLogEntry {
   details: string[];
 }
 
-export interface SheetLinkEntry {
-  id: string;
-  label: string;
-  spreadsheetId: string;
-  sheetUrl: string;
-  gasUrl: string;
-  lastActivatedAt: number;
-}
-
 export interface ActiveSheetConfig {
   spreadsheetId: string;
   sheetUrl: string;

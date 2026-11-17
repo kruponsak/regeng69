@@ -9,7 +9,6 @@ import {
   FileSpreadsheet,
   Link2,
   RefreshCw,
-  Trash2,
   Unplug,
   X,
 } from 'lucide-react';
@@ -19,13 +18,12 @@ import {
   SHEET_NAMES,
   buildGoogleSheetUrl,
 } from '../lib/sheetsDb';
-import { ActiveSheetConfig, SheetLinkEntry } from '../types';
+import { ActiveSheetConfig } from '../types';
 
 interface GoogleSheetsModalProps {
   isOpen: boolean;
   onClose: () => void;
   activeSheetConfig: ActiveSheetConfig;
-  sheetLinks: SheetLinkEntry[];
   isConnected: boolean;
   isSyncing: boolean;
   spreadsheetTitle?: string;
@@ -36,8 +34,6 @@ interface GoogleSheetsModalProps {
     gasUrl?: string;
     label?: string;
   }) => Promise<boolean>;
-  onSelectSheetLink: (entry: SheetLinkEntry) => Promise<boolean>;
-  onRemoveSheetLink: (entryId: string) => void;
   onDisconnect: () => void;
   onSyncNow: () => Promise<void>;
 }
@@ -62,15 +58,12 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
   isOpen,
   onClose,
   activeSheetConfig,
-  sheetLinks,
   isConnected,
   isSyncing,
   spreadsheetTitle,
   availableSheets,
   syncError,
   onConnectSheetLink,
-  onSelectSheetLink,
-  onRemoveSheetLink,
   onDisconnect,
   onSyncNow,
 }) => {
@@ -142,10 +135,10 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
             </div>
             <div>
               <h2 id="gs-modal-title" className="text-base font-semibold text-slate-900">
-                จัดการลิงก์ Google Sheets และซิงค์ข้อมูลอัตโนมัติ
+                ตั้งค่าลิงก์ Google Sheets (ลิงก์เดียวทั้งระบบ)
               </h2>
               <p className="text-xs text-slate-500">
-                เมื่อเปลี่ยนหรือกดใช้ลิงก์ใด ระบบจะแทนค่าลิงก์เริ่มต้นตอนเปิดเว็บในทุกเครื่องให้เป็นลิงก์นี้ทันที
+                ระบบใช้ลิงก์ Google Sheets เพียงลิงก์เดียว เมื่อใส่ลิงก์ใหม่จะแทนที่ลิงก์เก่าทันทีในทุกเครื่อง
               </p>
             </div>
           </div>
@@ -201,7 +194,9 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-xs font-medium text-slate-500">ลิงก์ชีทที่ใช้งานอยู่ (ยึดตามที่กดล่าสุด)</p>
+                  <p className="text-xs font-medium text-slate-500">
+                    ลิงก์ Google Sheets ปัจจุบัน (ใช้งานร่วมกันทุกเครื่อง)
+                  </p>
                   <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
                     <Clock className="h-3 w-3" />
                     {formatActivatedTime(activeSheetConfig.lastActivatedAt)}
@@ -292,105 +287,14 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
             )}
           </div>
 
-          {/* Saved Sheet Links History — Click to switch automatically */}
-          {sheetLinks.length > 0 && (
-            <div className="space-y-2.5 rounded-lg border border-slate-200 p-4">
-              <div>
-                <p className="text-sm font-semibold text-slate-900">
-                  รายการลิงก์ชีทที่บันทึกไว้ (คลิกเพื่อสลับใช้งานอัตโนมัติ)
-                </p>
-                <p className="text-xs text-slate-500">
-                  เมื่อกดเลือกลิงก์ใด ระบบจะแทนค่าลิงก์ที่เปิดอัตโนมัติตอนเริ่มในทุกเครื่องให้เป็นลิงก์ล่าสุดที่กดทันที
-                </p>
-              </div>
-
-              <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">
-                {sheetLinks.map((entry) => {
-                  const isCurrent =
-                    entry.spreadsheetId === activeSid &&
-                    (entry.gasUrl || '') === activeGasUrl;
-                  return (
-                    <div
-                      key={entry.id}
-                      className={`flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 ${
-                        isCurrent ? 'bg-blue-50/60' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1 space-y-0.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-semibold text-slate-900">
-                            {entry.label || 'Google Sheets'}
-                          </span>
-                          {isCurrent && (
-                            <span className="rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
-                              กำลังใช้งาน (ล่าสุด)
-                            </span>
-                          )}
-                          <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-600">
-                            {entry.gasUrl ? 'อ่าน + เขียนข้อมูลได้' : 'อ่านจากชีทสาธารณะ'}
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                          <span className="truncate font-mono">
-                            ID: {entry.spreadsheetId || '-'}
-                          </span>
-                          <span>กดล่าสุด: {formatActivatedTime(entry.lastActivatedAt)}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        {entry.sheetUrl && (
-                          <a
-                            href={entry.sheetUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-                            title="เปิดชีทในแท็บใหม่"
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                        <button
-                          type="button"
-                          disabled={isSyncing}
-                          onClick={async () => {
-                            await onSelectSheetLink(entry);
-                          }}
-                          className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                            isCurrent
-                              ? 'border border-blue-200 bg-white text-blue-900 hover:bg-blue-50'
-                              : 'bg-blue-900 text-white hover:bg-blue-950'
-                          }`}
-                        >
-                          <Link2 className="h-3 w-3" />
-                          {isCurrent ? 'ซิงค์ลิงก์นี้อีกครั้ง' : 'กดใช้ลิงก์นี้'}
-                        </button>
-                        {!isCurrent && entry.spreadsheetId !== DEFAULT_SPREADSHEET_ID && (
-                          <button
-                            type="button"
-                            onClick={() => onRemoveSheetLink(entry.id)}
-                            className="rounded-md border border-red-200 bg-white p-1.5 text-red-600 hover:bg-red-50"
-                            title="ลบออกจากรายการ"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Step 1: Change / Add Sheet Link Form */}
+          {/* Replace Single Sheet Link Form */}
           <div className="space-y-3 rounded-lg border border-slate-200 p-4">
             <div>
               <p className="text-sm font-semibold text-slate-900">
-                เปลี่ยนลิงก์ Google Sheets หรือวางลิงก์ใหม่
+                เปลี่ยนลิงก์ Google Sheets (แทนที่ลิงก์เดิมทันทีสำหรับทุกเครื่อง)
               </p>
               <p className="text-xs text-slate-600">
-                วางลิงก์ Google Sheets (<span className="font-mono">https://docs.google.com/spreadsheets/d/...</span>) หรือ Spreadsheet ID และลิงก์ Apps Script Web App (<span className="font-mono">/exec</span>) เพื่อสลับใช้งานทันที
+                วางลิงก์ Google Sheets (<span className="font-mono">https://docs.google.com/spreadsheets/d/...</span>) หรือ Spreadsheet ID และลิงก์ Apps Script Web App (<span className="font-mono">/exec</span>) เมื่อบันทึก ระบบจะแทนค่าลงในลิงก์เดิมทันที เหมือนทุกเครื่องเปิดลิงก์เดียวกัน
               </p>
             </div>
 
@@ -451,7 +355,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
                   className="inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-900 px-4 py-2 text-xs font-medium text-white hover:bg-blue-950 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Link2 className="h-3.5 w-3.5" />
-                  {isSyncing ? 'กำลังสลับและซิงค์...' : 'สลับและซิงค์ลิงก์นี้ทันที'}
+                  {isSyncing ? 'กำลังแทนที่ลิงก์และซิงค์...' : 'บันทึกลิงก์ใหม่ (แทนที่ลิงก์เดิมทันที)'}
                 </button>
               </div>
             </form>
@@ -463,7 +367,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
               <div className="flex items-center gap-2">
                 <Code2 className="h-4 w-4 text-blue-900" />
                 <p className="text-sm font-semibold text-slate-900">
-                  โค้ด Apps Script สำหรับเชื่อม Google Sheet (รองรับสลับหลายชีทอัตโนมัติ)
+                  โค้ด Apps Script สำหรับเชื่อม Google Sheet
                 </p>
               </div>
               <button
@@ -505,7 +409,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
         <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-6 py-3.5">
           <p className="text-xs text-slate-500">
-            เชื่อมต่อตรงระหว่างเว็บแอปและ Google Sheets (ยึดตามลิงก์ล่าสุดที่กดใช้งาน)
+            ใช้ลิงก์เดียวทั้งระบบ — เมื่อเปลี่ยนลิงก์ใหม่จะแทนที่ลิงก์เดิมทันทีในทุกเครื่อง
           </p>
           <button
             type="button"

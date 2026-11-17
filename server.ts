@@ -2,26 +2,12 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 
-interface StoredSheetLinkEntry {
-  id: string;
-  label: string;
-  spreadsheetId: string;
-  sheetUrl: string;
-  gasUrl: string;
-  lastActivatedAt: number;
-}
-
 interface StoredActiveSheetConfig {
   spreadsheetId: string;
   sheetUrl: string;
   gasUrl: string;
   label: string;
   lastActivatedAt: number;
-}
-
-interface StoredSheetState {
-  activeSheetConfig: StoredActiveSheetConfig;
-  sheetLinks: StoredSheetLinkEntry[];
 }
 
 const DEFAULT_SPREADSHEET_ID = '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE';
@@ -55,27 +41,14 @@ function buildGoogleSheetUrl(spreadsheetId: string): string {
   return `https://docs.google.com/spreadsheets/d/${clean}/edit`;
 }
 
-function createDefaultState(): StoredSheetState {
+function createDefaultConfig(): StoredActiveSheetConfig {
   const validGas = isValidAppsScriptUrl(DEFAULT_GAS_URL) ? DEFAULT_GAS_URL : '';
-  const activeSheetConfig: StoredActiveSheetConfig = {
+  return {
     spreadsheetId: DEFAULT_SPREADSHEET_ID,
     sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
     gasUrl: validGas,
-    label: 'ชีทหลักเริ่มต้น',
+    label: 'Google Sheets หลัก',
     lastActivatedAt: 0,
-  };
-  return {
-    activeSheetConfig,
-    sheetLinks: [
-      {
-        id: DEFAULT_SPREADSHEET_ID,
-        label: 'ชีทหลักเริ่มต้น',
-        spreadsheetId: DEFAULT_SPREADSHEET_ID,
-        sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
-        gasUrl: validGas,
-        lastActivatedAt: 0,
-      },
-    ],
   };
 }
 
@@ -92,82 +65,39 @@ function sanitizeConfig(raw: any): StoredActiveSheetConfig | null {
     sheetUrl: buildGoogleSheetUrl(finalSid),
     gasUrl: gUrl,
     label: typeof raw.label === 'string' ? raw.label.trim() : '',
-    lastActivatedAt: Number(raw.lastActivatedAt) || 0,
+    lastActivatedAt: Number(raw.lastActivatedAt) || Date.now(),
   };
 }
 
-function sanitizeLinks(rawList: any): StoredSheetLinkEntry[] {
-  if (!Array.isArray(rawList)) return [];
-  const map = new Map<string, StoredSheetLinkEntry>();
-  for (const item of rawList) {
-    if (!item || typeof item !== 'object') continue;
-    const sid = extractSpreadsheetId(String(item.spreadsheetId || item.sheetUrl || ''));
-    const gUrl = isValidAppsScriptUrl(String(item.gasUrl || ''))
-      ? String(item.gasUrl).trim()
-      : '';
-    if (!sid && !gUrl) continue;
-    const key = sid || gUrl;
-    const existing = map.get(key);
-    const ts = Number(item.lastActivatedAt) || 0;
-    if (!existing || ts >= existing.lastActivatedAt) {
-      map.set(key, {
-        id: key,
-        label: typeof item.label === 'string' ? item.label.trim() : existing?.label || '',
-        spreadsheetId: sid || existing?.spreadsheetId || '',
-        sheetUrl: (sid || existing?.spreadsheetId)
-          ? buildGoogleSheetUrl(sid || existing?.spreadsheetId || '')
-          : '',
-        gasUrl: gUrl || existing?.gasUrl || '',
-        lastActivatedAt: Math.max(ts, existing?.lastActivatedAt || 0),
-      });
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => b.lastActivatedAt - a.lastActivatedAt);
-}
-
-function readStoredState(): StoredSheetState {
+function readStoredConfig(): StoredActiveSheetConfig {
   try {
     if (!fs.existsSync(CONFIG_FILE)) {
-      return createDefaultState();
+      return createDefaultConfig();
     }
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
     const parsed = JSON.parse(raw);
-    const cfg = sanitizeConfig(parsed?.activeSheetConfig);
-    if (!cfg) {
-      return createDefaultState();
-    }
-    const links = sanitizeLinks([
-      ...(Array.isArray(parsed?.sheetLinks) ? parsed.sheetLinks : []),
-      {
-        id: cfg.spreadsheetId || cfg.gasUrl,
-        ...cfg,
-      },
-    ]);
-    return {
-      activeSheetConfig: cfg,
-      sheetLinks: links,
-    };
+    const cfg = sanitizeConfig(parsed?.activeSheetConfig ?? parsed);
+    return cfg || createDefaultConfig();
   } catch {
-    return createDefaultState();
+    return createDefaultConfig();
   }
 }
 
-function writeStoredState(state: StoredSheetState): void {
+function writeStoredConfig(activeSheetConfig: StoredActiveSheetConfig): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(state, null, 2), 'utf8');
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ activeSheetConfig }, null, 2), 'utf8');
 }
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '128kb' }));
 
   app.get('/api/sheet-config', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    const state = readStoredState();
+    const activeSheetConfig = readStoredConfig();
     res.json({
       ok: true,
-      activeSheetConfig: state.activeSheetConfig,
-      sheetLinks: state.sheetLinks,
+      activeSheetConfig,
     });
   });
 
@@ -179,40 +109,16 @@ async function startServer() {
       return;
     }
 
-    const currentState = readStoredState();
-    const forceReplace = Boolean(req.body?.forceReplace);
-    const shouldReplace =
-      forceReplace ||
-      incomingConfig.lastActivatedAt >= currentState.activeSheetConfig.lastActivatedAt;
-
-    const nextActive = shouldReplace
-      ? incomingConfig
-      : currentState.activeSheetConfig;
-
-    const incomingLinks = Array.isArray(req.body?.sheetLinks)
-      ? req.body.sheetLinks
-      : [];
-    const replaceLinks = Boolean(req.body?.replaceLinks);
-    const nextLinks = sanitizeLinks([
-      ...(replaceLinks ? [] : currentState.sheetLinks),
-      ...incomingLinks,
-      {
-        id: nextActive.spreadsheetId || nextActive.gasUrl,
-        ...nextActive,
-      },
-    ]);
-
-    const nextState: StoredSheetState = {
-      activeSheetConfig: nextActive,
-      sheetLinks: nextLinks,
+    const nextActive: StoredActiveSheetConfig = {
+      ...incomingConfig,
+      lastActivatedAt: incomingConfig.lastActivatedAt || Date.now(),
     };
 
     try {
-      writeStoredState(nextState);
+      writeStoredConfig(nextActive);
       res.json({
         ok: true,
-        activeSheetConfig: nextState.activeSheetConfig,
-        sheetLinks: nextState.sheetLinks,
+        activeSheetConfig: nextActive,
       });
     } catch (err: any) {
       res.status(500).json({
