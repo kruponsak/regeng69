@@ -959,7 +959,7 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-semibold text-slate-900">
-                      {isGoogleConnected && spreadsheetId
+                      {isGoogleConnected && (spreadsheetId || activeSheetConfig.gasUrl)
                         ? `เชื่อมต่อกับ "${activeSheetConfig.label || spreadsheetTitle || 'Google Spreadsheet'}" แล้ว`
                         : 'ยังไม่เชื่อมต่อไฟล์ Google Sheets (กำลังแสดงข้อมูลในเครื่อง)'}
                     </p>
@@ -978,7 +978,7 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {isGoogleConnected && spreadsheetId && (
+                  {isGoogleConnected && (spreadsheetId || activeSheetConfig.gasUrl) && (
                     <button
                       type="button"
                       onClick={onSyncNow}

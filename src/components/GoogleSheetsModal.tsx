@@ -69,7 +69,10 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 }) => {
   const [labelInput, setLabelInput] = useState(activeSheetConfig.label || '');
   const [sheetUrlInput, setSheetUrlInput] = useState(
-    activeSheetConfig.sheetUrl || buildGoogleSheetUrl(activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID)
+    activeSheetConfig.sheetUrl ||
+      buildGoogleSheetUrl(activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID) ||
+      activeSheetConfig.gasUrl ||
+      ''
   );
   const [gasUrlInput, setGasUrlInput] = useState(activeSheetConfig.gasUrl || '');
   const [copiedCode, setCopiedCode] = useState(false);
@@ -79,7 +82,9 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
     setLabelInput(activeSheetConfig.label || '');
     setSheetUrlInput(
       activeSheetConfig.sheetUrl ||
-        buildGoogleSheetUrl(activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID)
+        buildGoogleSheetUrl(activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID) ||
+        activeSheetConfig.gasUrl ||
+        ''
     );
     setGasUrlInput(activeSheetConfig.gasUrl || '');
   }, [activeSheetConfig]);
@@ -208,19 +213,21 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
                     : 'ยังไม่ได้เชื่อมต่อ Google Sheets'}
                 </p>
                 <p className="truncate font-mono text-[11px] text-slate-500">
-                  ID: {activeSid}
+                  {activeSid ? `ID: ${activeSid}` : `Apps Script: ${activeSheetConfig.gasUrl || '-'}`}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <a
-                  href={activeSheetUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                >
-                  เปิด Google Sheet นี้
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
+                {activeSheetUrl && (
+                  <a
+                    href={activeSheetUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    เปิด Google Sheet นี้
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
                 {isConnected && (
                   <>
                     <button

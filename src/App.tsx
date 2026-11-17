@@ -360,6 +360,9 @@ export default function App() {
         // 2) Public Google Sheets CSV read for targetSid
         if (!data) {
           const csvSid = targetSid || DEFAULT_SPREADSHEET_ID;
+          if (!csvSid) {
+            throw new Error('กรุณาระบุลิงก์ Google Sheets หรือลิงก์ Apps Script Web App URL');
+          }
           data = await fetchAllFromPublicSheetCsv(csvSid);
           if (data.discoveredGasUrl && isValidAppsScriptUrl(data.discoveredGasUrl)) {
             usedGasUrl = data.discoveredGasUrl;
@@ -559,8 +562,10 @@ export default function App() {
       let parsedGas = isValidAppsScriptUrl(rawGas) ? rawGas : '';
 
       // Smart detection if admin pasted an Apps Script URL into the sheet box or vice versa
-      if (!parsedSid && isValidAppsScriptUrl(rawSheet) && !parsedGas) {
-        parsedGas = rawSheet;
+      if (!parsedSid && isValidAppsScriptUrl(rawSheet)) {
+        if (!parsedGas || rawGas === activeConfigRef.current.gasUrl) {
+          parsedGas = rawSheet;
+        }
       }
       if (!parsedSid && rawGas) {
         parsedSid = extractSpreadsheetId(rawGas);

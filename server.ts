@@ -19,9 +19,12 @@ interface StoredServerSheetState {
 const DEFAULT_SPREADSHEET_ID = (
   process.env.VITE_DEFAULT_SPREADSHEET_ID ||
   process.env.DEFAULT_SPREADSHEET_ID ||
-  '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE'
+  ''
 ).trim();
-const DEFAULT_GAS_URL = (process.env.VITE_APPS_SCRIPT_URL || '').trim();
+const DEFAULT_GAS_URL = (
+  process.env.VITE_APPS_SCRIPT_URL ||
+  'https://script.google.com/macros/s/AKfycbziZn0nGQXNw3METIFDrKWDD3WXgqrCpeNXYjxf_59U103hDLU3V2FaIn-vm_hiNxErxg/exec'
+).trim();
 const ENV_INSTANCE_ID = (process.env.APP_INSTANCE_ID || '').trim();
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'sheet-config.json');
@@ -59,7 +62,7 @@ function createDefaultConfig(): StoredActiveSheetConfig {
     sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
     gasUrl: validGas,
     label: 'Google Sheets หลัก',
-    lastActivatedAt: 0,
+    lastActivatedAt: Date.now(),
   };
 }
 
