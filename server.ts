@@ -16,6 +16,8 @@ interface StoredServerSheetState {
   activeSheetConfig: StoredActiveSheetConfig;
 }
 
+const REPO_GAS_URL =
+  'https://script.google.com/macros/s/AKfycbziZn0nGQXNw3METIFDrKWDD3WXgqrCpeNXYjxf_59U103hDLU3V2FaIn-vm_hiNxErxg/exec';
 const DEFAULT_SPREADSHEET_ID = (
   process.env.VITE_DEFAULT_SPREADSHEET_ID ||
   process.env.DEFAULT_SPREADSHEET_ID ||
@@ -23,11 +25,11 @@ const DEFAULT_SPREADSHEET_ID = (
 ).trim();
 const DEFAULT_GAS_URL = (
   process.env.VITE_APPS_SCRIPT_URL ||
-  'https://script.google.com/macros/s/AKfycbziZn0nGQXNw3METIFDrKWDD3WXgqrCpeNXYjxf_59U103hDLU3V2FaIn-vm_hiNxErxg/exec'
+  REPO_GAS_URL
 ).trim();
 const ENV_INSTANCE_ID = (process.env.APP_INSTANCE_ID || '').trim();
 const DATA_DIR = path.resolve(process.cwd(), 'data');
-const CONFIG_FILE = path.join(DATA_DIR, 'sheet-config.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'regeng69-sheet-config.json');
 
 function extractSpreadsheetId(input: string): string {
   const trimmed = String(input || '').trim();
@@ -56,12 +58,12 @@ function buildGoogleSheetUrl(spreadsheetId: string): string {
 }
 
 function createDefaultConfig(): StoredActiveSheetConfig {
-  const validGas = isValidAppsScriptUrl(DEFAULT_GAS_URL) ? DEFAULT_GAS_URL : '';
+  const validGas = isValidAppsScriptUrl(DEFAULT_GAS_URL) ? DEFAULT_GAS_URL : REPO_GAS_URL;
   return {
     spreadsheetId: DEFAULT_SPREADSHEET_ID,
     sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
     gasUrl: validGas,
-    label: 'Google Sheets หลัก',
+    label: 'Google Sheets หลัก (regeng69)',
     lastActivatedAt: Date.now(),
   };
 }

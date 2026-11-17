@@ -61,7 +61,7 @@ const APP_PATH_SCOPE = (() => {
   }
 })();
 
-const STORAGE_PREFIX = `silapa74_${APP_PATH_SCOPE}`;
+const STORAGE_PREFIX = `regeng69_AKfycbziZn_${APP_PATH_SCOPE}`;
 const SERVER_INSTANCE_ID_STORAGE_KEY = `${STORAGE_PREFIX}_server_instance_id`;
 const GAS_URL_STORAGE_KEY = `${STORAGE_PREFIX}_gas_webapp_url`;
 const ACTIVE_SHEET_CONFIG_STORAGE_KEY = `${STORAGE_PREFIX}_active_sheet_config`;
@@ -85,10 +85,10 @@ export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenPath>('public-portal');
   const [transitionType, setTransitionType] = useState<TransitionType>('none');
 
-  // Application Data State (3 sheets: user, รายการ, ลงทะเบียน)
-  const [users, setUsers] = useState<UserAccount[]>(INITIAL_USERS);
-  const [competitions, setCompetitions] = useState<CompetitionItem[]>(INITIAL_COMPETITIONS);
-  const [registrations, setRegistrations] = useState<RegistrationRecord[]>(INITIAL_REGISTRATIONS);
+  // Application Data State (loaded directly from this repository's Google Apps Script on open)
+  const [users, setUsers] = useState<UserAccount[]>([INITIAL_USERS[0]]);
+  const [competitions, setCompetitions] = useState<CompetitionItem[]>([]);
+  const [registrations, setRegistrations] = useState<RegistrationRecord[]>([]);
   const [categoryGroups, setCategoryGroups] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem(CATEGORY_GROUPS_STORAGE_KEY);
@@ -170,14 +170,16 @@ export default function App() {
           const sid = extractSpreadsheetId(parsed.spreadsheetId || parsed.sheetUrl || '') || DEFAULT_SPREADSHEET_ID;
           const gUrl = isValidAppsScriptUrl(String(parsed.gasUrl || ''))
             ? String(parsed.gasUrl).trim()
-            : '';
-          return {
-            spreadsheetId: sid,
-            sheetUrl: buildGoogleSheetUrl(sid),
-            gasUrl: gUrl,
-            label: typeof parsed.label === 'string' ? parsed.label : '',
-            lastActivatedAt: Number(parsed.lastActivatedAt) || 0,
-          };
+            : defaultGas;
+          if (sid || gUrl) {
+            return {
+              spreadsheetId: sid,
+              sheetUrl: buildGoogleSheetUrl(sid),
+              gasUrl: gUrl,
+              label: typeof parsed.label === 'string' ? parsed.label : '',
+              lastActivatedAt: Number(parsed.lastActivatedAt) || 0,
+            };
+          }
         }
       }
 
@@ -187,7 +189,7 @@ export default function App() {
           spreadsheetId: DEFAULT_SPREADSHEET_ID,
           sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
           gasUrl: legacyGas,
-          label: 'ชีทหลักเริ่มต้น',
+          label: 'Google Sheets หลัก (regeng69)',
           lastActivatedAt: 1,
         };
       }
@@ -199,7 +201,7 @@ export default function App() {
       spreadsheetId: DEFAULT_SPREADSHEET_ID,
       sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
       gasUrl: defaultGas,
-      label: 'Google Sheets หลัก',
+      label: 'Google Sheets หลัก (regeng69)',
       lastActivatedAt: 0,
     };
   });
@@ -477,10 +479,12 @@ export default function App() {
       }
 
       const cfg = activeConfigRef.current;
+      const effectiveGas =
+        cfg.gasUrl || (isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL) ? DEFAULT_APPS_SCRIPT_URL : '');
       await syncSheetDatabase(
         {
           spreadsheetId: cfg.spreadsheetId,
-          gasUrl: cfg.gasUrl,
+          gasUrl: effectiveGas,
           label: cfg.label,
           activatedAt: cfg.lastActivatedAt,
         },

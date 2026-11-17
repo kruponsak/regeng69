@@ -19,13 +19,16 @@ import {
   INITIAL_USERS,
 } from './seedData';
 
+export const REPO_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbziZn0nGQXNw3METIFDrKWDD3WXgqrCpeNXYjxf_59U103hDLU3V2FaIn-vm_hiNxErxg/exec';
+
 export const DEFAULT_SPREADSHEET_ID = (
   (import.meta as any).env?.VITE_DEFAULT_SPREADSHEET_ID ||
   ''
 ).trim();
 export const DEFAULT_APPS_SCRIPT_URL = (
   (import.meta as any).env?.VITE_APPS_SCRIPT_URL ||
-  'https://script.google.com/macros/s/AKfycbziZn0nGQXNw3METIFDrKWDD3WXgqrCpeNXYjxf_59U103hDLU3V2FaIn-vm_hiNxErxg/exec'
+  REPO_APPS_SCRIPT_URL
 ).trim();
 export const CATEGORY_GROUPS_ROW_ID = '__CATEGORY_GROUPS__';
 export const SITE_SETTINGS_ROW_ID = '__SITE_SETTINGS__';
@@ -494,15 +497,19 @@ export async function fetchAllFromAppsScript(
     params.spreadsheetId = targetSpreadsheetId.trim();
   }
 
-  // Use simple GET first (fastest if doGet supports getAll)
-  let json = await callAppsScriptGet(gasUrl, params);
-
-  // Fallback to POST if doGet only returns a ping/ready message without sheet data
-  if (!json.data) {
+  // Call POST getAll directly first (1 round-trip; works with both doPost-only and full deployments), fallback to GET if needed
+  let json: any;
+  try {
     json = await callAppsScriptPost(gasUrl, {
       action: 'getAll',
       spreadsheetId: targetSpreadsheetId?.trim() || undefined,
     });
+  } catch {
+    json = await callAppsScriptGet(gasUrl, params);
+  }
+
+  if (!json?.data) {
+    json = await callAppsScriptGet(gasUrl, params);
   }
 
   if (
