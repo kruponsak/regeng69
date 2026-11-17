@@ -36,7 +36,9 @@ import {
   extractSpreadsheetId,
   fetchAllFromAppsScript,
   fetchAllFromPublicSheetCsv,
+  fetchServerSheetConfig,
   isValidAppsScriptUrl,
+  saveServerSheetConfig,
   serializeActiveSheetLinkRow,
   serializeCategoryGroupsRow,
   serializeCompetitionRow,
@@ -554,8 +556,10 @@ export default function App() {
         );
         persistSheetLinksLocally(nextLinks);
 
-        // Persist active link & forwarding pointers so other devices follow the latest clicked link automatically
+        // Persist active link to server (replaces startup default across all devices) & forwarding pointers in sheets
         if (explicitActivation) {
+          saveServerSheetConfig(nextConfig, nextLinks, { forceReplace: true }).catch(() => {});
+
           const writeTargets: Array<{ gUrl: string; sId: string }> = [];
           if (resolvedGas) {
             writeTargets.push({ gUrl: resolvedGas, sId: resolvedSid });
@@ -622,11 +626,29 @@ export default function App() {
     [applySheetData, persistActiveConfigLocally, persistSheetLinksLocally]
   );
 
-  // Auto-sync on mount across ALL devices (anchored to latest clicked sheet link)
-  useEffect(() => {
-    let cancelled = false;
+  const syncWithServerDefaultAndSheets = useCallback(
+    async (silent: boolean) => {
+      const serverData = await fetchServerSheetConfig();
+      if (serverData?.activeSheetConfig) {
+        const srv = serverData.activeSheetConfig;
+        const loc = activeConfigRef.current;
+        const serverIsNewer = srv.lastActivatedAt > (loc.lastActivatedAt || 0);
+        const localIsUnsetDefault =
+          (loc.lastActivatedAt || 0) === 0 &&
+          (srv.spreadsheetId !== loc.spreadsheetId || srv.gasUrl !== loc.gasUrl);
 
-    const runInitial = async () => {
+        if (serverIsNewer || localIsUnsetDefault) {
+          persistActiveConfigLocally(srv);
+        }
+
+        const mergedLinks = mergeSheetLinkLists(
+          sheetLinksRef.current,
+          serverData.sheetLinks || [],
+          serverIsNewer || localIsUnsetDefault ? srv : loc
+        );
+        persistSheetLinksLocally(mergedLinks);
+      }
+
       const cfg = activeConfigRef.current;
       await syncSheetDatabase(
         {
@@ -635,8 +657,20 @@ export default function App() {
           label: cfg.label,
           activatedAt: cfg.lastActivatedAt,
         },
-        { explicitActivation: false, silent: false }
+        { explicitActivation: false, silent }
       );
+    },
+    [persistActiveConfigLocally, persistSheetLinksLocally, syncSheetDatabase]
+  );
+
+  // Auto-sync on mount across ALL devices (always adopts latest server default link at startup)
+  useEffect(() => {
+    let cancelled = false;
+
+    const runInitial = async () => {
+      if (!cancelled) {
+        await syncWithServerDefaultAndSheets(false);
+      }
     };
 
     runInitial();
@@ -644,31 +678,13 @@ export default function App() {
     // Silent background auto-sync every 60s and when tab becomes active again
     const intervalId = window.setInterval(() => {
       if (!cancelled && document.visibilityState === 'visible') {
-        const cfg = activeConfigRef.current;
-        syncSheetDatabase(
-          {
-            spreadsheetId: cfg.spreadsheetId,
-            gasUrl: cfg.gasUrl,
-            label: cfg.label,
-            activatedAt: cfg.lastActivatedAt,
-          },
-          { explicitActivation: false, silent: true }
-        );
+        syncWithServerDefaultAndSheets(true);
       }
     }, 60000);
 
     const handleVisibility = () => {
       if (!cancelled && document.visibilityState === 'visible') {
-        const cfg = activeConfigRef.current;
-        syncSheetDatabase(
-          {
-            spreadsheetId: cfg.spreadsheetId,
-            gasUrl: cfg.gasUrl,
-            label: cfg.label,
-            activatedAt: cfg.lastActivatedAt,
-          },
-          { explicitActivation: false, silent: true }
-        );
+        syncWithServerDefaultAndSheets(true);
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -678,35 +694,35 @@ export default function App() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [syncSheetDatabase]);
+  }, [syncWithServerDefaultAndSheets]);
 
   const handleDisconnect = () => {
     const fallbackConfig: ActiveSheetConfig = {
       spreadsheetId: DEFAULT_SPREADSHEET_ID,
       sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
-      gasUrl: '',
+      gasUrl: isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL) ? DEFAULT_APPS_SCRIPT_URL : '',
       label: 'ชีทหลักเริ่มต้น',
-      lastActivatedAt: 0,
+      lastActivatedAt: Date.now(),
     };
-    setIsConnected(false);
     persistActiveConfigLocally(fallbackConfig);
-    setSpreadsheetTitle('');
-    setAvailableSheets([]);
+    const nextLinks = mergeSheetLinkLists(sheetLinksRef.current, [], fallbackConfig);
+    persistSheetLinksLocally(nextLinks);
+    saveServerSheetConfig(fallbackConfig, nextLinks, { forceReplace: true }).catch(() => {});
     setSyncError(null);
+    syncSheetDatabase(
+      {
+        spreadsheetId: fallbackConfig.spreadsheetId,
+        gasUrl: fallbackConfig.gasUrl,
+        label: fallbackConfig.label,
+        activatedAt: fallbackConfig.lastActivatedAt,
+      },
+      { explicitActivation: true, silent: false }
+    );
   };
 
   const handleSyncNow = useCallback(async (): Promise<void> => {
-    const cfg = activeConfigRef.current;
-    await syncSheetDatabase(
-      {
-        spreadsheetId: cfg.spreadsheetId,
-        gasUrl: cfg.gasUrl,
-        label: cfg.label,
-        activatedAt: cfg.lastActivatedAt,
-      },
-      { explicitActivation: false, silent: false }
-    );
-  }, [syncSheetDatabase]);
+    await syncWithServerDefaultAndSheets(false);
+  }, [syncWithServerDefaultAndSheets]);
 
   const handleConnectSheetLink = useCallback(
     async (input: {
@@ -844,6 +860,7 @@ export default function App() {
       const next = sheetLinksRef.current.filter((l) => l.id !== entryId);
       persistSheetLinksLocally(next);
       const activeCfg = activeConfigRef.current;
+      saveServerSheetConfig(activeCfg, next, { replaceLinks: true }).catch(() => {});
       if (isConnected && activeCfg.gasUrl) {
         upsertRowViaAppsScript(
           activeCfg.gasUrl,

@@ -949,3 +949,58 @@ function doPost(e) {
     }
   }
 }`;
+
+export interface ServerSheetConfigResponse {
+  activeSheetConfig: ActiveSheetConfig | null;
+  sheetLinks: SheetLinkEntry[];
+}
+
+export async function fetchServerSheetConfig(): Promise<ServerSheetConfigResponse | null> {
+  try {
+    const res = await fetch(`/api/sheet-config?_t=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || !json.ok || !json.activeSheetConfig) return null;
+    return {
+      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
+      sheetLinks: Array.isArray(json.sheetLinks)
+        ? (json.sheetLinks as SheetLinkEntry[])
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveServerSheetConfig(
+  activeSheetConfig: ActiveSheetConfig,
+  sheetLinks: SheetLinkEntry[],
+  options?: { forceReplace?: boolean; replaceLinks?: boolean }
+): Promise<ServerSheetConfigResponse | null> {
+  try {
+    const res = await fetch('/api/sheet-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        activeSheetConfig,
+        sheetLinks,
+        forceReplace: Boolean(options?.forceReplace),
+        replaceLinks: Boolean(options?.replaceLinks),
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || !json.ok) return null;
+    return {
+      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
+      sheetLinks: Array.isArray(json.sheetLinks)
+        ? (json.sheetLinks as SheetLinkEntry[])
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
