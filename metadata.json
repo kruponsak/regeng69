@@ -1,0 +1,6 @@
+{
+  "name": "ระบบจัดการแข่งขันงานศิลปหัตถกรรมนักเรียน ครั้งที่ 74",
+  "description": "ระบบแสดงรายการแข่งขัน กำหนดการ ลงทะเบียนนักเรียน และจัดการข้อมูลงานศิลปหัตถกรรมนักเรียน ครั้งที่ 74 เชื่อมต่อฐานข้อมูล Google Sheets 3 ชีท (user, รายการ, ลงทะเบียน)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
