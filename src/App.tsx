@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
+  ActiveSheetConfig,
   ActivityLogEntry,
   CompetitionItem,
   ConfirmationState,
@@ -8,6 +9,7 @@ import {
   DEFAULT_SITE_SETTINGS,
   RegistrationRecord,
   ScreenPath,
+  SheetLinkEntry,
   SiteSettings,
   TransitionType,
   UserAccount,
@@ -19,23 +21,29 @@ import {
   INITIAL_USERS,
 } from './lib/seedData';
 import {
+  ACTIVE_SHEET_LINK_ROW_ID,
   CATEGORY_GROUPS_ROW_ID,
   DEFAULT_APPS_SCRIPT_URL,
   DEFAULT_SPREADSHEET_ID,
   GAS_URL_ROW_ID,
   LOG_ROW_PREFIX,
+  SHEET_LINKS_ROW_ID,
   SHEET_NAMES,
   SITE_SETTINGS_ROW_ID,
   SheetDatabaseState,
+  buildGoogleSheetUrl,
   deleteRowViaAppsScript,
+  extractSpreadsheetId,
   fetchAllFromAppsScript,
   fetchAllFromPublicSheetCsv,
   isValidAppsScriptUrl,
+  serializeActiveSheetLinkRow,
   serializeCategoryGroupsRow,
   serializeCompetitionRow,
   serializeGasUrlRow,
   serializeLogRow,
   serializeRegistrationRow,
+  serializeSheetLinksRow,
   serializeSiteSettingsRow,
   serializeUserRow,
   upsertRowViaAppsScript,
@@ -48,9 +56,81 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
 
 const GAS_URL_STORAGE_KEY = 'silapa74_gas_webapp_url';
+const ACTIVE_SHEET_CONFIG_STORAGE_KEY = 'silapa74_active_sheet_config';
+const SHEET_LINKS_STORAGE_KEY = 'silapa74_sheet_links';
 const CATEGORY_GROUPS_STORAGE_KEY = 'silapa74_category_groups';
 const SITE_SETTINGS_STORAGE_KEY = 'silapa74_site_settings';
 const ACTIVITY_LOGS_STORAGE_KEY = 'silapa74_activity_logs';
+
+function mergeSheetLinkLists(
+  baseList: SheetLinkEntry[],
+  incomingList: SheetLinkEntry[],
+  activeConfig?: ActiveSheetConfig | null
+): SheetLinkEntry[] {
+  const map = new Map<string, SheetLinkEntry>();
+
+  const upsertEntry = (item: SheetLinkEntry) => {
+    const cleanId = extractSpreadsheetId(item.spreadsheetId || item.sheetUrl);
+    const cleanGas = isValidAppsScriptUrl(item.gasUrl || '') ? item.gasUrl.trim() : '';
+    if (!cleanId && !cleanGas) return;
+    const key = cleanId || cleanGas;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        id: key,
+        label: item.label?.trim() || '',
+        spreadsheetId: cleanId,
+        sheetUrl: cleanId ? buildGoogleSheetUrl(cleanId) : '',
+        gasUrl: cleanGas,
+        lastActivatedAt: Number(item.lastActivatedAt) || 0,
+      });
+      return;
+    }
+    const incomingNewer = (Number(item.lastActivatedAt) || 0) >= existing.lastActivatedAt;
+    map.set(key, {
+      id: key,
+      label: incomingNewer
+        ? item.label?.trim() || existing.label
+        : existing.label || item.label?.trim() || '',
+      spreadsheetId: cleanId || existing.spreadsheetId,
+      sheetUrl: (cleanId || existing.spreadsheetId)
+        ? buildGoogleSheetUrl(cleanId || existing.spreadsheetId)
+        : '',
+      gasUrl: incomingNewer ? cleanGas || existing.gasUrl : existing.gasUrl || cleanGas,
+      lastActivatedAt: Math.max(existing.lastActivatedAt, Number(item.lastActivatedAt) || 0),
+    });
+  };
+
+  baseList.forEach(upsertEntry);
+  incomingList.forEach(upsertEntry);
+
+  if (activeConfig && (activeConfig.spreadsheetId || activeConfig.gasUrl)) {
+    upsertEntry({
+      id: activeConfig.spreadsheetId || activeConfig.gasUrl,
+      label: activeConfig.label || 'Google Sheets',
+      spreadsheetId: activeConfig.spreadsheetId,
+      sheetUrl:
+        activeConfig.sheetUrl ||
+        (activeConfig.spreadsheetId ? buildGoogleSheetUrl(activeConfig.spreadsheetId) : ''),
+      gasUrl: activeConfig.gasUrl,
+      lastActivatedAt: activeConfig.lastActivatedAt || 0,
+    });
+  }
+
+  // Always keep default initial sheet available in quick list
+  if (!map.has(DEFAULT_SPREADSHEET_ID)) {
+    map.set(DEFAULT_SPREADSHEET_ID, {
+      id: DEFAULT_SPREADSHEET_ID,
+      label: 'ชีทหลักเริ่มต้น',
+      spreadsheetId: DEFAULT_SPREADSHEET_ID,
+      sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
+      gasUrl: isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL) ? DEFAULT_APPS_SCRIPT_URL : '',
+      lastActivatedAt: 0,
+    });
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.lastActivatedAt - a.lastActivatedAt);
+}
 
 function generateNextId(prefix: string, existingIds: string[]): string {
   const nums = existingIds
@@ -114,38 +194,138 @@ export default function App() {
   // Authenticated App User (admin or school admin)
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
 
-  // Direct Google Sheets Apps Script Connection State (No Firebase)
-  const [gasUrl, setGasUrl] = useState<string>(() => {
+  // Direct Google Sheets Connection State (No Firebase) — Anchored to Latest Clicked Link
+  const [activeSheetConfig, setActiveSheetConfig] = useState<ActiveSheetConfig>(() => {
+    const defaultGas = isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL)
+      ? DEFAULT_APPS_SCRIPT_URL
+      : '';
     try {
       const params = new URLSearchParams(window.location.search);
+      const urlParamSheet = extractSpreadsheetId(params.get('sheet') || '');
       const urlParamGas = (params.get('gas') || '').trim();
-      if (urlParamGas && isValidAppsScriptUrl(urlParamGas)) {
-        localStorage.setItem(GAS_URL_STORAGE_KEY, urlParamGas);
+      const validParamGas = isValidAppsScriptUrl(urlParamGas) ? urlParamGas : '';
+
+      if (urlParamSheet || validParamGas) {
+        const sid = urlParamSheet || DEFAULT_SPREADSHEET_ID;
+        const fromUrl: ActiveSheetConfig = {
+          spreadsheetId: sid,
+          sheetUrl: buildGoogleSheetUrl(sid),
+          gasUrl: validParamGas,
+          label: 'ลิงก์จาก URL ล่าสุด',
+          lastActivatedAt: Date.now(),
+        };
+        localStorage.setItem(ACTIVE_SHEET_CONFIG_STORAGE_KEY, JSON.stringify(fromUrl));
+        if (validParamGas) {
+          localStorage.setItem(GAS_URL_STORAGE_KEY, validParamGas);
+        }
+        params.delete('sheet');
         params.delete('gas');
         const nextSearch = params.toString();
         const cleanUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
         window.history.replaceState({}, '', cleanUrl);
-        return urlParamGas;
+        return fromUrl;
       }
-      const stored = (localStorage.getItem(GAS_URL_STORAGE_KEY) || '').trim();
-      if (stored && isValidAppsScriptUrl(stored)) return stored;
+
+      const savedConfigRaw = localStorage.getItem(ACTIVE_SHEET_CONFIG_STORAGE_KEY);
+      if (savedConfigRaw) {
+        const parsed = JSON.parse(savedConfigRaw);
+        if (parsed && typeof parsed === 'object') {
+          const sid = extractSpreadsheetId(parsed.spreadsheetId || parsed.sheetUrl || '') || DEFAULT_SPREADSHEET_ID;
+          const gUrl = isValidAppsScriptUrl(String(parsed.gasUrl || ''))
+            ? String(parsed.gasUrl).trim()
+            : '';
+          return {
+            spreadsheetId: sid,
+            sheetUrl: buildGoogleSheetUrl(sid),
+            gasUrl: gUrl,
+            label: typeof parsed.label === 'string' ? parsed.label : '',
+            lastActivatedAt: Number(parsed.lastActivatedAt) || 0,
+          };
+        }
+      }
+
+      const legacyGas = (localStorage.getItem(GAS_URL_STORAGE_KEY) || '').trim();
+      if (legacyGas && isValidAppsScriptUrl(legacyGas)) {
+        return {
+          spreadsheetId: DEFAULT_SPREADSHEET_ID,
+          sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
+          gasUrl: legacyGas,
+          label: 'ชีทหลักเริ่มต้น',
+          lastActivatedAt: 1,
+        };
+      }
     } catch {
       // ignore storage/URL errors
     }
-    return isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL) ? DEFAULT_APPS_SCRIPT_URL : '';
+
+    return {
+      spreadsheetId: DEFAULT_SPREADSHEET_ID,
+      sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
+      gasUrl: defaultGas,
+      label: 'ชีทหลักเริ่มต้น',
+      lastActivatedAt: 0,
+    };
   });
+
+  const [sheetLinks, setSheetLinks] = useState<SheetLinkEntry[]>(() => {
+    try {
+      const raw = localStorage.getItem(SHEET_LINKS_STORAGE_KEY);
+      const saved = raw ? (JSON.parse(raw) as SheetLinkEntry[]) : [];
+      return mergeSheetLinkLists(Array.isArray(saved) ? saved : [], [], activeSheetConfig);
+    } catch {
+      return mergeSheetLinkLists([], [], activeSheetConfig);
+    }
+  });
+
+  const gasUrl = activeSheetConfig.gasUrl;
+  const activeSpreadsheetId = activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID;
+
   const [isConnected, setIsConnected] = useState(false);
   const [isSyncing, setIsSyncing] = useState(true);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [spreadsheetTitle, setSpreadsheetTitle] = useState<string>('');
   const [availableSheets, setAvailableSheets] = useState<string[]>([]);
   const [isSheetsModalOpen, setIsSheetsModalOpen] = useState(false);
-  const gasUrlRef = useRef(gasUrl);
-  gasUrlRef.current = gasUrl;
 
   // Confirmation Modal State
   const [confirmState, setConfirmState] = useState<ConfirmationState | null>(null);
   const [isConfirmLoading, setIsConfirmLoading] = useState(false);
+
+  const activeConfigRef = useRef(activeSheetConfig);
+  activeConfigRef.current = activeSheetConfig;
+  const gasUrlRef = useRef(gasUrl);
+  gasUrlRef.current = gasUrl;
+  const spreadsheetIdRef = useRef(activeSpreadsheetId);
+  spreadsheetIdRef.current = activeSpreadsheetId;
+  const sheetLinksRef = useRef(sheetLinks);
+  sheetLinksRef.current = sheetLinks;
+
+  const persistActiveConfigLocally = useCallback((config: ActiveSheetConfig) => {
+    setActiveSheetConfig(config);
+    activeConfigRef.current = config;
+    gasUrlRef.current = config.gasUrl;
+    spreadsheetIdRef.current = config.spreadsheetId || DEFAULT_SPREADSHEET_ID;
+    try {
+      localStorage.setItem(ACTIVE_SHEET_CONFIG_STORAGE_KEY, JSON.stringify(config));
+      if (config.gasUrl) {
+        localStorage.setItem(GAS_URL_STORAGE_KEY, config.gasUrl);
+      } else {
+        localStorage.removeItem(GAS_URL_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage error
+    }
+  }, []);
+
+  const persistSheetLinksLocally = useCallback((nextLinks: SheetLinkEntry[]) => {
+    setSheetLinks(nextLinks);
+    sheetLinksRef.current = nextLinks;
+    try {
+      localStorage.setItem(SHEET_LINKS_STORAGE_KEY, JSON.stringify(nextLinks));
+    } catch {
+      // ignore storage error
+    }
+  }, []);
 
   // Sync document.title with active screen & siteSettings
   useEffect(() => {
@@ -193,139 +373,302 @@ export default function App() {
     } catch {
       // ignore storage error
     }
-    if (data.discoveredGasUrl && isValidAppsScriptUrl(data.discoveredGasUrl)) {
-      setGasUrl((prev) => prev || data.discoveredGasUrl || '');
-      try {
-        if (!localStorage.getItem(GAS_URL_STORAGE_KEY)) {
-          localStorage.setItem(GAS_URL_STORAGE_KEY, data.discoveredGasUrl);
-        }
-      } catch {
-        // ignore storage error
-      }
-    }
     setSpreadsheetTitle(data.spreadsheetTitle || 'Google Sheets (3 ชีท)');
     setAvailableSheets(data.sheets || []);
     setIsConnected(true);
   }, []);
 
-  const syncFromSheets = useCallback(
-    async (targetUrl: string) => {
-      const trimmed = targetUrl.trim();
-      if (!trimmed) {
-        // Fallback to direct public sheet sync when no Apps Script URL is provided
-        setIsSyncing(true);
-        setSyncError(null);
-        try {
-          const data = await fetchAllFromPublicSheetCsv(DEFAULT_SPREADSHEET_ID);
-          applySheetData(data);
-        } catch (err: any) {
-          setIsConnected(false);
-          setSyncError(err?.message || 'ไม่สามารถโหลดข้อมูลจาก Google Sheets ได้');
-        } finally {
-          setIsSyncing(false);
-        }
-        return;
+  const syncSheetDatabase = useCallback(
+    async (
+      target?: {
+        spreadsheetId?: string;
+        gasUrl?: string;
+        label?: string;
+        activatedAt?: number;
+      },
+      options?: {
+        explicitActivation?: boolean;
+        silent?: boolean;
+        hopCount?: number;
       }
+    ): Promise<boolean> => {
+      const explicitActivation = Boolean(options?.explicitActivation);
+      const silent = Boolean(options?.silent);
+      const hopCount = options?.hopCount || 0;
 
-      if (!isValidAppsScriptUrl(trimmed)) {
+      const prevConfig = activeConfigRef.current;
+      const targetSid =
+        extractSpreadsheetId(target?.spreadsheetId || '') ||
+        (explicitActivation ? '' : prevConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID);
+
+      let targetGas = (target?.gasUrl || '').trim();
+      if (targetGas && !isValidAppsScriptUrl(targetGas)) {
         setSyncError(
-          'ลิงก์ต้องเป็น Google Apps Script Web App URL ที่ขึ้นต้นด้วย https://script.google.com/macros/s/.../exec'
+          'ลิงก์ Apps Script ต้องขึ้นต้นด้วย https://script.google.com/macros/s/.../exec'
         );
-        return;
+        return false;
       }
 
-      setIsSyncing(true);
-      setSyncError(null);
-      try {
-        const data = await fetchAllFromAppsScript(trimmed, true);
-        applySheetData(data);
-        setGasUrl(trimmed);
-        try {
-          localStorage.setItem(GAS_URL_STORAGE_KEY, trimmed);
-        } catch {
-          // ignore storage error
+      if (!targetGas && targetSid) {
+        const matchedSaved = sheetLinksRef.current.find(
+          (l) => l.spreadsheetId === targetSid && isValidAppsScriptUrl(l.gasUrl)
+        );
+        if (matchedSaved) {
+          targetGas = matchedSaved.gasUrl;
+        } else if (!explicitActivation && prevConfig.spreadsheetId === targetSid) {
+          targetGas = prevConfig.gasUrl;
         }
-        // Persist Apps Script URL inside the sheet so other devices/mobile phones auto-discover it
-        if (data.discoveredGasUrl !== trimmed) {
-          upsertRowViaAppsScript(
-            trimmed,
-            SHEET_NAMES.COMPETITIONS,
-            GAS_URL_ROW_ID,
-            serializeGasUrlRow(trimmed)
-          ).catch(() => {
-            // ignore background config save error
-          });
-        }
-      } catch (err: any) {
-        setIsConnected(false);
-        setSyncError(err?.message || 'ไม่สามารถเชื่อมต่อกับ Google Sheets ได้');
-      } finally {
-        setIsSyncing(false);
       }
-    },
-    [applySheetData]
-  );
 
-  // Auto-sync on mount across ALL devices (Apps Script URL if present, otherwise public Google Sheet CSV)
-  useEffect(() => {
-    let cancelled = false;
-
-    const runSync = async (silent: boolean) => {
       if (!silent) {
         setIsSyncing(true);
+        setSyncError(null);
       }
-      setSyncError(null);
 
       try {
-        const currentGasUrl = gasUrlRef.current;
-        if (currentGasUrl) {
+        let data: SheetDatabaseState | null = null;
+        let usedGasUrl = '';
+
+        // 1) Try target Apps Script URL (or previous multi-sheet Apps Script if explicit sheet switch without new GAS)
+        const candidateGas =
+          targetGas ||
+          (explicitActivation && isValidAppsScriptUrl(prevConfig.gasUrl)
+            ? prevConfig.gasUrl
+            : '');
+
+        if (candidateGas) {
           try {
-            const data = await fetchAllFromAppsScript(currentGasUrl, true);
-            if (!cancelled) {
-              applySheetData(data);
-              if (data.discoveredGasUrl !== currentGasUrl) {
-                upsertRowViaAppsScript(
-                  currentGasUrl,
-                  SHEET_NAMES.COMPETITIONS,
-                  GAS_URL_ROW_ID,
-                  serializeGasUrlRow(currentGasUrl)
-                ).catch(() => {});
-              }
+            data = await fetchAllFromAppsScript(
+              candidateGas,
+              true,
+              targetSid || undefined
+            );
+            usedGasUrl = candidateGas;
+          } catch (err: any) {
+            if (err?.message === 'APPS_SCRIPT_SPREADSHEET_MISMATCH' && targetSid) {
+              // Apps Script does not point to targetSid; fall through to public CSV read for targetSid
+              data = null;
+              usedGasUrl = '';
+            } else if (targetSid) {
+              // Fall back to direct public CSV read when Apps Script fails transiently
+              data = null;
+              usedGasUrl = '';
+            } else {
+              throw err;
             }
-            return;
-          } catch {
-            // If Apps Script URL failed transiently, fall back to direct public sheet read
           }
         }
 
-        const data = await fetchAllFromPublicSheetCsv(DEFAULT_SPREADSHEET_ID);
-        if (!cancelled) {
-          applySheetData(data);
+        // 2) Public Google Sheets CSV read for targetSid
+        if (!data) {
+          const csvSid = targetSid || DEFAULT_SPREADSHEET_ID;
+          data = await fetchAllFromPublicSheetCsv(csvSid);
+          if (data.discoveredGasUrl && isValidAppsScriptUrl(data.discoveredGasUrl)) {
+            usedGasUrl = data.discoveredGasUrl;
+          }
         }
+
+        const resolvedSid =
+          extractSpreadsheetId(data.spreadsheetId || '') ||
+          targetSid ||
+          DEFAULT_SPREADSHEET_ID;
+        const resolvedGas =
+          usedGasUrl ||
+          (targetGas && isValidAppsScriptUrl(targetGas) ? targetGas : '') ||
+          (data.discoveredGasUrl && isValidAppsScriptUrl(data.discoveredGasUrl)
+            ? data.discoveredGasUrl
+            : '');
+        const activatedAt = explicitActivation
+          ? target?.activatedAt || Date.now()
+          : target?.activatedAt ?? prevConfig.lastActivatedAt ?? 0;
+
+        // Auto-follow newer forwarding pointer stored in Google Sheets (unless user just clicked a link right now)
+        const remoteActive = data.activeSheetLink;
+        if (
+          !explicitActivation &&
+          hopCount < 2 &&
+          remoteActive &&
+          remoteActive.lastActivatedAt > activatedAt
+        ) {
+          const remoteSid = extractSpreadsheetId(
+            remoteActive.spreadsheetId || remoteActive.sheetUrl || ''
+          );
+          const remoteGas = isValidAppsScriptUrl(remoteActive.gasUrl || '')
+            ? remoteActive.gasUrl.trim()
+            : '';
+          const isDifferentTarget =
+            (remoteSid && remoteSid !== resolvedSid) ||
+            (remoteGas && remoteGas !== resolvedGas);
+
+          if (isDifferentTarget) {
+            const followedConfig: ActiveSheetConfig = {
+              spreadsheetId: remoteSid || resolvedSid,
+              sheetUrl: buildGoogleSheetUrl(remoteSid || resolvedSid),
+              gasUrl: remoteGas,
+              label: remoteActive.label || 'ลิงก์ชีทล่าสุดจากผู้ดูแลระบบ',
+              lastActivatedAt: remoteActive.lastActivatedAt,
+            };
+            persistActiveConfigLocally(followedConfig);
+            const mergedLinks = mergeSheetLinkLists(
+              sheetLinksRef.current,
+              data.sheetLinks || [],
+              followedConfig
+            );
+            persistSheetLinksLocally(mergedLinks);
+            return await syncSheetDatabase(
+              {
+                spreadsheetId: followedConfig.spreadsheetId,
+                gasUrl: followedConfig.gasUrl,
+                label: followedConfig.label,
+                activatedAt: followedConfig.lastActivatedAt,
+              },
+              { explicitActivation: false, silent, hopCount: hopCount + 1 }
+            );
+          }
+        }
+
+        const resolvedLabel =
+          (target?.label && target.label.trim()) ||
+          (data.spreadsheetTitle &&
+          data.spreadsheetTitle !== 'Google Sheets (ซิงค์อัตโนมัติ)'
+            ? data.spreadsheetTitle
+            : '') ||
+          sheetLinksRef.current.find((l) => l.spreadsheetId === resolvedSid)?.label ||
+          'Google Sheets';
+
+        const nextConfig: ActiveSheetConfig = {
+          spreadsheetId: resolvedSid,
+          sheetUrl: buildGoogleSheetUrl(resolvedSid),
+          gasUrl: resolvedGas,
+          label: resolvedLabel,
+          lastActivatedAt: activatedAt,
+        };
+
+        applySheetData(data);
+        persistActiveConfigLocally(nextConfig);
+
+        const nextLinks = mergeSheetLinkLists(
+          sheetLinksRef.current,
+          data.sheetLinks || [],
+          nextConfig
+        );
+        persistSheetLinksLocally(nextLinks);
+
+        // Persist active link & forwarding pointers so other devices follow the latest clicked link automatically
+        if (explicitActivation) {
+          const writeTargets: Array<{ gUrl: string; sId: string }> = [];
+          if (resolvedGas) {
+            writeTargets.push({ gUrl: resolvedGas, sId: resolvedSid });
+          }
+          if (
+            prevConfig.gasUrl &&
+            isValidAppsScriptUrl(prevConfig.gasUrl) &&
+            (prevConfig.spreadsheetId !== resolvedSid || prevConfig.gasUrl !== resolvedGas)
+          ) {
+            writeTargets.push({
+              gUrl: prevConfig.gasUrl,
+              sId: prevConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID,
+            });
+          }
+
+          for (const wt of writeTargets) {
+            if (wt.sId === resolvedSid && resolvedGas && data.discoveredGasUrl !== resolvedGas) {
+              upsertRowViaAppsScript(
+                wt.gUrl,
+                SHEET_NAMES.COMPETITIONS,
+                GAS_URL_ROW_ID,
+                serializeGasUrlRow(resolvedGas),
+                wt.sId
+              ).catch(() => {});
+            }
+            upsertRowViaAppsScript(
+              wt.gUrl,
+              SHEET_NAMES.COMPETITIONS,
+              ACTIVE_SHEET_LINK_ROW_ID,
+              serializeActiveSheetLinkRow(nextConfig),
+              wt.sId
+            ).catch(() => {});
+            upsertRowViaAppsScript(
+              wt.gUrl,
+              SHEET_NAMES.COMPETITIONS,
+              SHEET_LINKS_ROW_ID,
+              serializeSheetLinksRow(nextLinks),
+              wt.sId
+            ).catch(() => {});
+          }
+        } else if (resolvedGas && data.discoveredGasUrl !== resolvedGas) {
+          upsertRowViaAppsScript(
+            resolvedGas,
+            SHEET_NAMES.COMPETITIONS,
+            GAS_URL_ROW_ID,
+            serializeGasUrlRow(resolvedGas),
+            resolvedSid
+          ).catch(() => {});
+        }
+
+        return true;
       } catch (err: any) {
-        if (!cancelled && !silent) {
+        if (!silent) {
           setIsConnected(false);
           setSyncError(err?.message || 'ไม่สามารถเชื่อมต่อกับ Google Sheets ได้');
         }
+        return false;
       } finally {
-        if (!cancelled && !silent) {
+        if (!silent) {
           setIsSyncing(false);
         }
       }
+    },
+    [applySheetData, persistActiveConfigLocally, persistSheetLinksLocally]
+  );
+
+  // Auto-sync on mount across ALL devices (anchored to latest clicked sheet link)
+  useEffect(() => {
+    let cancelled = false;
+
+    const runInitial = async () => {
+      const cfg = activeConfigRef.current;
+      await syncSheetDatabase(
+        {
+          spreadsheetId: cfg.spreadsheetId,
+          gasUrl: cfg.gasUrl,
+          label: cfg.label,
+          activatedAt: cfg.lastActivatedAt,
+        },
+        { explicitActivation: false, silent: false }
+      );
     };
 
-    runSync(false);
+    runInitial();
 
     // Silent background auto-sync every 60s and when tab becomes active again
     const intervalId = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        runSync(true);
+      if (!cancelled && document.visibilityState === 'visible') {
+        const cfg = activeConfigRef.current;
+        syncSheetDatabase(
+          {
+            spreadsheetId: cfg.spreadsheetId,
+            gasUrl: cfg.gasUrl,
+            label: cfg.label,
+            activatedAt: cfg.lastActivatedAt,
+          },
+          { explicitActivation: false, silent: true }
+        );
       }
     }, 60000);
 
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        runSync(true);
+      if (!cancelled && document.visibilityState === 'visible') {
+        const cfg = activeConfigRef.current;
+        syncSheetDatabase(
+          {
+            spreadsheetId: cfg.spreadsheetId,
+            gasUrl: cfg.gasUrl,
+            label: cfg.label,
+            activatedAt: cfg.lastActivatedAt,
+          },
+          { explicitActivation: false, silent: true }
+        );
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -335,21 +678,184 @@ export default function App() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [syncSheetDatabase]);
 
   const handleDisconnect = () => {
+    const fallbackConfig: ActiveSheetConfig = {
+      spreadsheetId: DEFAULT_SPREADSHEET_ID,
+      sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
+      gasUrl: '',
+      label: 'ชีทหลักเริ่มต้น',
+      lastActivatedAt: 0,
+    };
     setIsConnected(false);
-    setGasUrl('');
+    persistActiveConfigLocally(fallbackConfig);
     setSpreadsheetTitle('');
     setAvailableSheets([]);
     setSyncError(null);
-    try {
-      localStorage.removeItem(GAS_URL_STORAGE_KEY);
-    } catch {
-      // ignore storage error
-    }
   };
+
+  const handleSyncNow = useCallback(async (): Promise<void> => {
+    const cfg = activeConfigRef.current;
+    await syncSheetDatabase(
+      {
+        spreadsheetId: cfg.spreadsheetId,
+        gasUrl: cfg.gasUrl,
+        label: cfg.label,
+        activatedAt: cfg.lastActivatedAt,
+      },
+      { explicitActivation: false, silent: false }
+    );
+  }, [syncSheetDatabase]);
+
+  const handleConnectSheetLink = useCallback(
+    async (input: {
+      sheetUrlOrId?: string;
+      gasUrl?: string;
+      label?: string;
+    }): Promise<boolean> => {
+      const rawSheet = (input.sheetUrlOrId || '').trim();
+      const rawGas = (input.gasUrl || '').trim();
+
+      let parsedSid = extractSpreadsheetId(rawSheet);
+      let parsedGas = isValidAppsScriptUrl(rawGas) ? rawGas : '';
+
+      // Smart detection if admin pasted an Apps Script URL into the sheet box or vice versa
+      if (!parsedSid && isValidAppsScriptUrl(rawSheet) && !parsedGas) {
+        parsedGas = rawSheet;
+      }
+      if (!parsedSid && rawGas) {
+        parsedSid = extractSpreadsheetId(rawGas);
+      }
+
+      if (rawGas && !isValidAppsScriptUrl(rawGas) && !extractSpreadsheetId(rawGas)) {
+        setSyncError(
+          'ลิงก์ Apps Script ต้องขึ้นต้นด้วย https://script.google.com/macros/s/.../exec'
+        );
+        return false;
+      }
+
+      if (rawSheet && !parsedSid && !isValidAppsScriptUrl(rawSheet)) {
+        setSyncError(
+          'รูปแบบลิงก์ Google Sheets ไม่ถูกต้อง กรุณาวางลิงก์ https://docs.google.com/spreadsheets/d/... หรือ Spreadsheet ID'
+        );
+        return false;
+      }
+
+      if (!parsedSid && !parsedGas) {
+        setSyncError('กรุณาระบุลิงก์ Google Sheets หรือลิงก์ Apps Script Web App URL');
+        return false;
+      }
+
+      const nowMs = Date.now();
+      const ok = await syncSheetDatabase(
+        {
+          spreadsheetId: parsedSid || undefined,
+          gasUrl: parsedGas || undefined,
+          label: input.label?.trim() || undefined,
+          activatedAt: nowMs,
+        },
+        { explicitActivation: true, silent: false }
+      );
+
+      if (ok) {
+        const finalCfg = activeConfigRef.current;
+        const logEntry: ActivityLogEntry = {
+          id: `${LOG_ROW_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: new Date().toISOString(),
+          actorUsername: currentUser?.username || 'admin',
+          actorName: currentUser?.schoolName || 'ผู้ดูแลระบบ',
+          actorRole: currentUser?.role || 'admin',
+          action: 'update',
+          targetType: 'settings',
+          targetId: ACTIVE_SHEET_LINK_ROW_ID,
+          targetTitle: finalCfg.label || finalCfg.spreadsheetId,
+          summary: `เปลี่ยนลิงก์ Google Sheets ล่าสุดเป็น "${finalCfg.label || finalCfg.spreadsheetId}"`,
+          details: [
+            `Spreadsheet ID: ${finalCfg.spreadsheetId}`,
+            `Apps Script: ${finalCfg.gasUrl ? 'เชื่อมต่อพร้อมเขียนข้อมูล' : 'อ่านข้อมูลจากชีทสาธารณะ'}`,
+          ],
+        };
+        setActivityLogs((prev) => [logEntry, ...prev]);
+        if (finalCfg.gasUrl) {
+          upsertRowViaAppsScript(
+            finalCfg.gasUrl,
+            SHEET_NAMES.COMPETITIONS,
+            logEntry.id,
+            serializeLogRow(logEntry),
+            finalCfg.spreadsheetId
+          ).catch(() => {});
+        }
+      }
+
+      return ok;
+    },
+    [currentUser, syncSheetDatabase]
+  );
+
+  const handleSelectSheetLink = useCallback(
+    async (entry: SheetLinkEntry): Promise<boolean> => {
+      const nowMs = Date.now();
+      const ok = await syncSheetDatabase(
+        {
+          spreadsheetId: entry.spreadsheetId,
+          gasUrl: entry.gasUrl,
+          label: entry.label,
+          activatedAt: nowMs,
+        },
+        { explicitActivation: true, silent: false }
+      );
+      if (ok) {
+        const finalCfg = activeConfigRef.current;
+        const logEntry: ActivityLogEntry = {
+          id: `${LOG_ROW_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: new Date().toISOString(),
+          actorUsername: currentUser?.username || 'admin',
+          actorName: currentUser?.schoolName || 'ผู้ดูแลระบบ',
+          actorRole: currentUser?.role || 'admin',
+          action: 'update',
+          targetType: 'settings',
+          targetId: ACTIVE_SHEET_LINK_ROW_ID,
+          targetTitle: finalCfg.label || finalCfg.spreadsheetId,
+          summary: `สลับลิงก์ Google Sheets ตามที่กดล่าสุดเป็น "${finalCfg.label || finalCfg.spreadsheetId}"`,
+          details: [
+            `Spreadsheet ID: ${finalCfg.spreadsheetId}`,
+            `Apps Script: ${finalCfg.gasUrl ? 'เชื่อมต่อพร้อมเขียนข้อมูล' : 'อ่านข้อมูลจากชีทสาธารณะ'}`,
+          ],
+        };
+        setActivityLogs((prev) => [logEntry, ...prev]);
+        if (finalCfg.gasUrl) {
+          upsertRowViaAppsScript(
+            finalCfg.gasUrl,
+            SHEET_NAMES.COMPETITIONS,
+            logEntry.id,
+            serializeLogRow(logEntry),
+            finalCfg.spreadsheetId
+          ).catch(() => {});
+        }
+      }
+      return ok;
+    },
+    [currentUser, syncSheetDatabase]
+  );
+
+  const handleRemoveSheetLink = useCallback(
+    (entryId: string) => {
+      const next = sheetLinksRef.current.filter((l) => l.id !== entryId);
+      persistSheetLinksLocally(next);
+      const activeCfg = activeConfigRef.current;
+      if (isConnected && activeCfg.gasUrl) {
+        upsertRowViaAppsScript(
+          activeCfg.gasUrl,
+          SHEET_NAMES.COMPETITIONS,
+          SHEET_LINKS_ROW_ID,
+          serializeSheetLinksRow(next),
+          activeCfg.spreadsheetId
+        ).catch(() => {});
+      }
+    },
+    [isConnected, persistSheetLinksLocally]
+  );
 
   const handleNavigate = useCallback((path: ScreenPath, transition: TransitionType) => {
     setTransitionType(transition);
@@ -410,12 +916,14 @@ export default function App() {
       });
 
       const activeGasUrl = gasUrlRef.current;
+      const activeSid = spreadsheetIdRef.current;
       if (isConnected && activeGasUrl) {
         upsertRowViaAppsScript(
           activeGasUrl,
           SHEET_NAMES.COMPETITIONS,
           fullEntry.id,
-          serializeLogRow(fullEntry)
+          serializeLogRow(fullEntry),
+          activeSid
         ).catch(() => {
           // keep primary action resilient if background log append fails
         });
@@ -441,7 +949,8 @@ export default function App() {
             gasUrl,
             SHEET_NAMES.COMPETITIONS,
             CATEGORY_GROUPS_ROW_ID,
-            serializeCategoryGroupsRow(nextGroups)
+            serializeCategoryGroupsRow(nextGroups),
+            spreadsheetIdRef.current
           );
         } catch (err: any) {
           setSyncError(err?.message || 'บันทึกลำดับกลุ่มกิจกรรมลง Google Sheets ไม่สำเร็จ');
@@ -513,7 +1022,8 @@ export default function App() {
             gasUrl,
             SHEET_NAMES.COMPETITIONS,
             SITE_SETTINGS_ROW_ID,
-            serializeSiteSettingsRow(sanitized)
+            serializeSiteSettingsRow(sanitized),
+            spreadsheetIdRef.current
           );
         } catch (err: any) {
           setSyncError(err?.message || 'บันทึกการตั้งค่าหัวเรื่องลง Google Sheets ไม่สำเร็จ');
@@ -579,7 +1089,8 @@ export default function App() {
           gasUrl,
           SHEET_NAMES.COMPETITIONS,
           targetItem.id,
-          serializeCompetitionRow(targetItem)
+          serializeCompetitionRow(targetItem),
+          spreadsheetIdRef.current
         );
       }
       setCompetitions((prev) =>
@@ -687,7 +1198,8 @@ export default function App() {
             gasUrl,
             SHEET_NAMES.COMPETITIONS,
             item.id,
-            serializeCompetitionRow(item)
+            serializeCompetitionRow(item),
+            spreadsheetIdRef.current
           );
         }
       }
@@ -738,7 +1250,12 @@ export default function App() {
           throw new Error('ยังไม่ได้ตั้งค่า Apps Script Web App URL สำหรับลบข้อมูลในชีท');
         }
         if (isConnected && gasUrl) {
-          await deleteRowViaAppsScript(gasUrl, SHEET_NAMES.COMPETITIONS, comp.id);
+          await deleteRowViaAppsScript(
+            gasUrl,
+            SHEET_NAMES.COMPETITIONS,
+            comp.id,
+            spreadsheetIdRef.current
+          );
         }
         setCompetitions((prev) => prev.filter((c) => c.id !== comp.id));
         recordActivityLog({
@@ -777,7 +1294,8 @@ export default function App() {
           gasUrl,
           SHEET_NAMES.USERS,
           targetUser.id,
-          serializeUserRow(targetUser)
+          serializeUserRow(targetUser),
+          spreadsheetIdRef.current
         );
       }
       setUsers((prev) =>
@@ -840,7 +1358,12 @@ export default function App() {
           throw new Error('ยังไม่ได้ตั้งค่า Apps Script Web App URL สำหรับลบข้อมูลในชีท');
         }
         if (isConnected && gasUrl) {
-          await deleteRowViaAppsScript(gasUrl, SHEET_NAMES.USERS, user.id);
+          await deleteRowViaAppsScript(
+            gasUrl,
+            SHEET_NAMES.USERS,
+            user.id,
+            spreadsheetIdRef.current
+          );
         }
         setUsers((prev) => prev.filter((u) => u.id !== user.id));
         recordActivityLog({
@@ -879,7 +1402,8 @@ export default function App() {
           gasUrl,
           SHEET_NAMES.REGISTRATIONS,
           targetReg.id,
-          serializeRegistrationRow(targetReg)
+          serializeRegistrationRow(targetReg),
+          spreadsheetIdRef.current
         );
       }
       setRegistrations((prev) =>
@@ -979,7 +1503,12 @@ export default function App() {
           throw new Error('ยังไม่ได้ตั้งค่า Apps Script Web App URL สำหรับลบข้อมูลในชีท');
         }
         if (isConnected && gasUrl) {
-          await deleteRowViaAppsScript(gasUrl, SHEET_NAMES.REGISTRATIONS, reg.id);
+          await deleteRowViaAppsScript(
+            gasUrl,
+            SHEET_NAMES.REGISTRATIONS,
+            reg.id,
+            spreadsheetIdRef.current
+          );
         }
         setRegistrations((prev) => prev.filter((r) => r.id !== reg.id));
         recordActivityLog({
@@ -1072,14 +1601,17 @@ export default function App() {
               siteSettings={siteSettings}
               activityLogs={activityLogs}
               isGoogleConnected={isConnected}
-              spreadsheetId={DEFAULT_SPREADSHEET_ID}
+              spreadsheetId={activeSpreadsheetId}
               spreadsheetTitle={spreadsheetTitle}
+              activeSheetConfig={activeSheetConfig}
+              sheetLinks={sheetLinks}
               isSyncing={isSyncing}
               onNavigate={handleNavigate}
               onLoginSuccess={handleLoginSuccess}
               onLogout={handleLogout}
               onOpenSheetsModal={() => setIsSheetsModalOpen(true)}
-              onSyncNow={() => syncFromSheets(gasUrl)}
+              onSyncNow={handleSyncNow}
+              onSelectSheetLink={handleSelectSheetLink}
               onSaveCategoryGroups={handleSaveCategoryGroups}
               onSaveSiteSettings={handleSaveSiteSettings}
               onRequestConfirm={requestConfirmation}
@@ -1098,15 +1630,18 @@ export default function App() {
         <GoogleSheetsModal
           isOpen={isSheetsModalOpen}
           onClose={() => setIsSheetsModalOpen(false)}
-          gasUrl={gasUrl}
+          activeSheetConfig={activeSheetConfig}
+          sheetLinks={sheetLinks}
           isConnected={isConnected}
           isSyncing={isSyncing}
           spreadsheetTitle={spreadsheetTitle}
           availableSheets={availableSheets}
           syncError={syncError}
-          onConnectUrl={syncFromSheets}
+          onConnectSheetLink={handleConnectSheetLink}
+          onSelectSheetLink={handleSelectSheetLink}
+          onRemoveSheetLink={handleRemoveSheetLink}
           onDisconnect={handleDisconnect}
-          onSyncNow={() => syncFromSheets(gasUrl)}
+          onSyncNow={handleSyncNow}
         />
       )}
 

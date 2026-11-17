@@ -8,10 +8,12 @@ import {
   ClipboardList,
   Clock,
   Edit3,
+  ExternalLink,
   FileSpreadsheet,
   Globe,
   History,
   Layers,
+  Link2,
   Lock,
   LogOut,
   Plus,
@@ -25,6 +27,7 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  ActiveSheetConfig,
   ActivityLogAction,
   ActivityLogEntry,
   ActivityLogTargetType,
@@ -36,6 +39,7 @@ import {
   DEFAULT_SITE_SETTINGS,
   RegistrationRecord,
   ScreenPath,
+  SheetLinkEntry,
   SiteSettings,
   TransitionType,
   UserAccount,
@@ -53,12 +57,15 @@ interface AdminCentralScreenProps {
   isGoogleConnected: boolean;
   spreadsheetId: string;
   spreadsheetTitle?: string;
+  activeSheetConfig: ActiveSheetConfig;
+  sheetLinks: SheetLinkEntry[];
   isSyncing: boolean;
   onNavigate: (path: ScreenPath, transition: TransitionType) => void;
   onLoginSuccess: (user: UserAccount, targetScreen: ScreenPath) => void;
   onLogout: () => void;
   onOpenSheetsModal: () => void;
   onSyncNow: () => Promise<void>;
+  onSelectSheetLink: (entry: SheetLinkEntry) => Promise<boolean>;
   onSaveCategoryGroups: (nextGroups: string[]) => Promise<boolean>;
   onSaveSiteSettings: (nextSettings: SiteSettings) => Promise<boolean>;
   onRequestConfirm: (config: Omit<ConfirmationState, 'isOpen'>) => void;
@@ -183,12 +190,15 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
   isGoogleConnected,
   spreadsheetId,
   spreadsheetTitle,
+  activeSheetConfig,
+  sheetLinks,
   isSyncing,
   onNavigate,
   onLoginSuccess,
   onLogout,
   onOpenSheetsModal,
   onSyncNow,
+  onSelectSheetLink,
   onSaveCategoryGroups,
   onSaveSiteSettings,
   onRequestConfirm,
@@ -947,36 +957,84 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
         <main className="mx-auto w-full max-w-6xl space-y-6 p-6">
           {/* Google Sheets Database Connection Strip (System Admin Only) */}
           {isAdmin && (
-            <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="space-y-0.5">
-              <p className="text-xs font-medium text-slate-500">สถานะฐานข้อมูล Google Sheets</p>
-              <p className="text-sm font-semibold text-slate-900">
-                {isGoogleConnected && spreadsheetId
-                  ? `เชื่อมต่อกับ "${spreadsheetTitle || 'Google Spreadsheet'}" แล้ว`
-                  : 'ยังไม่เชื่อมต่อไฟล์ Google Sheets (กำลังแสดงข้อมูลในเครื่อง)'}
-              </p>
-            </div>
-            <div className="flex items-center gap-2.5">
-              {isGoogleConnected && spreadsheetId && (
-                <button
-                  type="button"
-                  onClick={onSyncNow}
-                  disabled={isSyncing}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                  ซิงค์จากชีทล่าสุด
-                </button>
+            <section className="space-y-3 rounded-xl border border-slate-200 bg-white px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-xs font-medium text-slate-500">
+                    สถานะฐานข้อมูล Google Sheets (ยึดตามลิงก์ล่าสุดที่กดใช้งาน)
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-slate-900">
+                      {isGoogleConnected && spreadsheetId
+                        ? `เชื่อมต่อกับ "${activeSheetConfig.label || spreadsheetTitle || 'Google Spreadsheet'}" แล้ว`
+                        : 'ยังไม่เชื่อมต่อไฟล์ Google Sheets (กำลังแสดงข้อมูลในเครื่อง)'}
+                    </p>
+                    {activeSheetConfig.sheetUrl && (
+                      <a
+                        href={activeSheetConfig.sheetUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-slate-600 hover:bg-slate-100 hover:text-blue-900"
+                        title="เปิด Google Sheet ปัจจุบัน"
+                      >
+                        {spreadsheetId.slice(0, 12)}...
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {isGoogleConnected && spreadsheetId && (
+                    <button
+                      type="button"
+                      onClick={onSyncNow}
+                      disabled={isSyncing}
+                      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                      ซิงค์จากชีทล่าสุด
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onOpenSheetsModal}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800"
+                  >
+                    <FileSpreadsheet className="h-3.5 w-3.5" />
+                    {isGoogleConnected ? 'เปลี่ยน / ตั้งค่าลิงก์ชีท' : 'เชื่อมต่อ Google Sheets'}
+                  </button>
+                </div>
+              </div>
+
+              {sheetLinks.length > 1 && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                  <span className="text-[11px] font-medium text-slate-500">
+                    สลับลิงก์ชีทด่วน (กดเพื่อยึดเป็นลิงก์ล่าสุด):
+                  </span>
+                  {sheetLinks.map((entry) => {
+                    const isCurrent =
+                      entry.spreadsheetId === activeSheetConfig.spreadsheetId &&
+                      (entry.gasUrl || '') === (activeSheetConfig.gasUrl || '');
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        disabled={isSyncing}
+                        onClick={() => onSelectSheetLink(entry)}
+                        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                          isCurrent
+                            ? 'border-blue-900 bg-blue-900 text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-900'
+                        }`}
+                      >
+                        <Link2 className="h-3 w-3" />
+                        {entry.label || `${entry.spreadsheetId.slice(0, 8)}...`}
+                        {isCurrent && ' (ล่าสุด)'}
+                      </button>
+                    );
+                  })}
+                </div>
               )}
-              <button
-                type="button"
-                onClick={onOpenSheetsModal}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800"
-              >
-                <FileSpreadsheet className="h-3.5 w-3.5" />
-                {isGoogleConnected ? 'ตั้งค่า Google Sheets' : 'เชื่อมต่อ Google Sheets'}
-              </button>
-            </div>
             </section>
           )}
 

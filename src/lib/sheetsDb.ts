@@ -1,4 +1,5 @@
 import {
+  ActiveSheetConfig,
   ActivityLogAction,
   ActivityLogEntry,
   ActivityLogTargetType,
@@ -8,6 +9,7 @@ import {
   DEFAULT_CATEGORY_GROUPS,
   DEFAULT_SITE_SETTINGS,
   RegistrationRecord,
+  SheetLinkEntry,
   SiteSettings,
   StudentEntry,
   UserAccount,
@@ -25,6 +27,8 @@ export const DEFAULT_APPS_SCRIPT_URL = (
 export const CATEGORY_GROUPS_ROW_ID = '__CATEGORY_GROUPS__';
 export const SITE_SETTINGS_ROW_ID = '__SITE_SETTINGS__';
 export const GAS_URL_ROW_ID = '__GAS_URL__';
+export const ACTIVE_SHEET_LINK_ROW_ID = '__ACTIVE_SHEET_LINK__';
+export const SHEET_LINKS_ROW_ID = '__SHEET_LINKS__';
 export const LOG_ROW_PREFIX = '__LOG__';
 export const LOG_ROW_MARKER = '__LOG__';
 
@@ -44,6 +48,9 @@ export interface SheetDatabaseState {
   siteSettings: SiteSettings;
   logs: ActivityLogEntry[];
   discoveredGasUrl?: string;
+  activeSheetLink?: ActiveSheetConfig | null;
+  sheetLinks?: SheetLinkEntry[];
+  spreadsheetId?: string;
   spreadsheetTitle?: string;
   sheets?: string[];
 }
@@ -130,6 +137,32 @@ export function serializeSiteSettingsRow(settings: SiteSettings): string[] {
     '__CONFIG__',
     '',
     JSON.stringify(settings),
+    '',
+    '',
+    '',
+    new Date().toISOString(),
+  ];
+}
+
+export function serializeActiveSheetLinkRow(config: ActiveSheetConfig): string[] {
+  return [
+    ACTIVE_SHEET_LINK_ROW_ID,
+    '__CONFIG__',
+    '',
+    JSON.stringify(config),
+    '',
+    '',
+    '',
+    new Date(config.lastActivatedAt || Date.now()).toISOString(),
+  ];
+}
+
+export function serializeSheetLinksRow(links: SheetLinkEntry[]): string[] {
+  return [
+    SHEET_LINKS_ROW_ID,
+    '__CONFIG__',
+    '',
+    JSON.stringify(links),
     '',
     '',
     '',
@@ -227,6 +260,68 @@ function parseDiscoveredGasUrl(rows: any[][]): string {
     .find((row) => String(row[0] || '') === GAS_URL_ROW_ID);
   const candidate = String(configRow?.[3] || '').trim();
   return isValidAppsScriptUrl(candidate) ? candidate : '';
+}
+
+function parseActiveSheetLink(rows: any[][]): ActiveSheetConfig | null {
+  if (!Array.isArray(rows) || rows.length <= 1) return null;
+  const configRow = rows
+    .slice(1)
+    .find((row) => String(row[0] || '') === ACTIVE_SHEET_LINK_ROW_ID);
+  if (!configRow || !configRow[3]) return null;
+  try {
+    const parsed = JSON.parse(String(configRow[3]));
+    if (!parsed || typeof parsed !== 'object') return null;
+    const spreadsheetId = extractSpreadsheetId(String(parsed.spreadsheetId || parsed.sheetUrl || ''));
+    const gasUrl = isValidAppsScriptUrl(String(parsed.gasUrl || ''))
+      ? String(parsed.gasUrl).trim()
+      : '';
+    if (!spreadsheetId && !gasUrl) return null;
+    const lastActivatedAt = Number(parsed.lastActivatedAt) || 0;
+    return {
+      spreadsheetId,
+      sheetUrl: spreadsheetId ? buildGoogleSheetUrl(spreadsheetId) : '',
+      gasUrl,
+      label: typeof parsed.label === 'string' ? parsed.label.trim() : '',
+      lastActivatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseSheetLinks(rows: any[][]): SheetLinkEntry[] {
+  if (!Array.isArray(rows) || rows.length <= 1) return [];
+  const configRow = rows
+    .slice(1)
+    .find((row) => String(row[0] || '') === SHEET_LINKS_ROW_ID);
+  if (!configRow || !configRow[3]) return [];
+  try {
+    const parsed = JSON.parse(String(configRow[3]));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item: any): SheetLinkEntry | null => {
+        if (!item || typeof item !== 'object') return null;
+        const spreadsheetId = extractSpreadsheetId(
+          String(item.spreadsheetId || item.sheetUrl || '')
+        );
+        const gasUrl = isValidAppsScriptUrl(String(item.gasUrl || ''))
+          ? String(item.gasUrl).trim()
+          : '';
+        if (!spreadsheetId && !gasUrl) return null;
+        return {
+          id: String(item.id || spreadsheetId || gasUrl),
+          label: String(item.label || '').trim(),
+          spreadsheetId,
+          sheetUrl: spreadsheetId ? buildGoogleSheetUrl(spreadsheetId) : '',
+          gasUrl,
+          lastActivatedAt: Number(item.lastActivatedAt) || 0,
+        };
+      })
+      .filter((x): x is SheetLinkEntry => x !== null)
+      .sort((a, b) => b.lastActivatedAt - a.lastActivatedAt);
+  } catch {
+    return [];
+  }
 }
 
 function parseSiteSettings(rows: any[][]): SiteSettings {
@@ -390,6 +485,25 @@ export function isValidAppsScriptUrl(url: string): boolean {
   );
 }
 
+export function extractSpreadsheetId(input: string): string {
+  const trimmed = String(input || '').trim();
+  if (!trimmed) return '';
+  const urlMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (urlMatch && urlMatch[1]) {
+    return urlMatch[1];
+  }
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed) && !trimmed.startsWith('http')) {
+    return trimmed;
+  }
+  return '';
+}
+
+export function buildGoogleSheetUrl(spreadsheetId: string): string {
+  const clean = extractSpreadsheetId(spreadsheetId) || spreadsheetId.trim();
+  if (!clean) return '';
+  return `https://docs.google.com/spreadsheets/d/${clean}/edit`;
+}
+
 function buildFetchFailureError(): Error {
   return new Error(
     'Failed to fetch: เบราว์เซอร์ไม่สามารถดึงข้อมูลจากลิงก์ Apps Script นี้ได้ (มักเกิดจากตอน Deploy ตั้งค่า "ผู้มีสิทธิ์เข้าถึง (Who has access)" เป็น "เฉพาะฉัน" แทนที่จะเป็น "ทุกคน (Anyone)" หรือยังไม่ได้กดยืนยันสิทธิ์ตอน Deploy)'
@@ -461,10 +575,26 @@ async function callAppsScriptPost(
 
 export async function fetchAllFromAppsScript(
   gasUrl: string,
-  seedIfEmpty = true
+  seedIfEmpty = true,
+  targetSpreadsheetId?: string
 ): Promise<SheetDatabaseState> {
+  const params: Record<string, string> = { action: 'getAll' };
+  if (targetSpreadsheetId && targetSpreadsheetId.trim()) {
+    params.spreadsheetId = targetSpreadsheetId.trim();
+  }
+
   // Use simple GET first (fastest and avoids POST redirect quirks on initial connect)
-  let json = await callAppsScriptGet(gasUrl, { action: 'getAll' });
+  let json = await callAppsScriptGet(gasUrl, params);
+
+  // If caller explicitly targeted a different spreadsheetId and Apps Script returned a mismatched spreadsheetId,
+  // reject so caller can fall back to direct public CSV read for the target sheet.
+  if (
+    targetSpreadsheetId &&
+    json.spreadsheetId &&
+    String(json.spreadsheetId).trim() !== targetSpreadsheetId.trim()
+  ) {
+    throw new Error('APPS_SCRIPT_SPREADSHEET_MISMATCH');
+  }
 
   const sheetsList: string[] = json.sheets || [];
   const missingAny =
@@ -474,7 +604,6 @@ export async function fetchAllFromAppsScript(
 
   const userRows = json.data?.user || [];
   const compRows = json.data?.['รายการ'] || [];
-  const regRows = json.data?.['ลงทะเบียน'] || [];
 
   const needsSeed =
     seedIfEmpty && (missingAny || (userRows.length <= 1 && compRows.length <= 1));
@@ -482,6 +611,7 @@ export async function fetchAllFromAppsScript(
   if (needsSeed) {
     json = await callAppsScriptPost(gasUrl, {
       action: 'getAll',
+      spreadsheetId: targetSpreadsheetId?.trim() || undefined,
       seedIfEmpty: true,
       seedData: {
         users: INITIAL_USERS.map(serializeUserRow),
@@ -498,6 +628,8 @@ export async function fetchAllFromAppsScript(
   const siteSettings = parseSiteSettings(compRawRows);
   const logs = parseActivityLogs(compRawRows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRawRows);
+  const activeSheetLink = parseActiveSheetLink(compRawRows);
+  const sheetLinks = parseSheetLinks(compRawRows);
   const registrations = parseRegistrations(json.data?.['ลงทะเบียน'] || []);
 
   // Ensure default admin account always exists in memory
@@ -514,6 +646,9 @@ export async function fetchAllFromAppsScript(
     siteSettings,
     logs,
     discoveredGasUrl,
+    activeSheetLink,
+    sheetLinks,
+    spreadsheetId: String(json.spreadsheetId || targetSpreadsheetId || '').trim() || undefined,
     spreadsheetTitle: json.spreadsheetTitle,
     sheets: json.sheets || [],
   };
@@ -600,14 +735,15 @@ async function fetchPublicSheetCsv(
 export async function fetchAllFromPublicSheetCsv(
   spreadsheetId: string = DEFAULT_SPREADSHEET_ID
 ): Promise<SheetDatabaseState> {
+  const cleanId = extractSpreadsheetId(spreadsheetId) || DEFAULT_SPREADSHEET_ID;
   const [userRes, compRes, regRes] = await Promise.all([
-    fetchPublicSheetCsv(spreadsheetId, SHEET_NAMES.USERS, 'username'),
-    fetchPublicSheetCsv(spreadsheetId, SHEET_NAMES.COMPETITIONS, 'categoryGroup'),
-    fetchPublicSheetCsv(spreadsheetId, SHEET_NAMES.REGISTRATIONS, 'competitionId'),
+    fetchPublicSheetCsv(cleanId, SHEET_NAMES.USERS, 'username'),
+    fetchPublicSheetCsv(cleanId, SHEET_NAMES.COMPETITIONS, 'categoryGroup'),
+    fetchPublicSheetCsv(cleanId, SHEET_NAMES.REGISTRATIONS, 'competitionId'),
   ]);
 
   if (!userRes.exists && !compRes.exists && !regRes.exists) {
-    throw new Error('ไม่พบข้อมูลชีททั้ง 3 ชีทใน Google Spreadsheet');
+    throw new Error('ไม่พบข้อมูลชีททั้ง 3 ชีทใน Google Spreadsheet (ตรวจสอบชื่อชีท user, รายการ, ลงทะเบียน และสิทธิ์แชร์แบบสาธารณะ)');
   }
 
   const users = parseUsers(userRes.rows);
@@ -616,6 +752,8 @@ export async function fetchAllFromPublicSheetCsv(
   const siteSettings = parseSiteSettings(compRes.rows);
   const logs = parseActivityLogs(compRes.rows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRes.rows);
+  const activeSheetLink = parseActiveSheetLink(compRes.rows);
+  const sheetLinks = parseSheetLinks(compRes.rows);
   const registrations = parseRegistrations(regRes.rows);
 
   const hasAdmin = users.some((u) => u.username === 'admin' && u.role === 'admin');
@@ -636,6 +774,9 @@ export async function fetchAllFromPublicSheetCsv(
     siteSettings,
     logs,
     discoveredGasUrl,
+    activeSheetLink,
+    sheetLinks,
+    spreadsheetId: cleanId,
     spreadsheetTitle: 'Google Sheets (ซิงค์อัตโนมัติ)',
     sheets,
   };
@@ -645,10 +786,12 @@ export async function upsertRowViaAppsScript(
   gasUrl: string,
   sheetName: SheetTabName,
   id: string,
-  rowValues: string[]
+  rowValues: string[],
+  targetSpreadsheetId?: string
 ): Promise<void> {
   await callAppsScriptPost(gasUrl, {
     action: 'upsert',
+    spreadsheetId: targetSpreadsheetId?.trim() || undefined,
     sheetName,
     id,
     rowValues,
@@ -658,10 +801,12 @@ export async function upsertRowViaAppsScript(
 export async function deleteRowViaAppsScript(
   gasUrl: string,
   sheetName: SheetTabName,
-  id: string
+  id: string,
+  targetSpreadsheetId?: string
 ): Promise<void> {
   await callAppsScriptPost(gasUrl, {
     action: 'delete',
+    spreadsheetId: targetSpreadsheetId?.trim() || undefined,
     sheetName,
     id,
   });
@@ -676,7 +821,10 @@ const HEADERS = {
   'ลงทะเบียน': ['id', 'competitionId', 'categoryGroup', 'mainActivity', 'subActivity', 'level', 'schoolName', 'advisorsJson', 'studentsJson', 'submittedBy', 'createdAt', 'updatedAt']
 };
 
-function getSpreadsheet_() {
+function getSpreadsheet_(targetId) {
+  if (targetId && String(targetId).trim() !== '') {
+    return SpreadsheetApp.openById(String(targetId).trim());
+  }
   try {
     var active = SpreadsheetApp.getActiveSpreadsheet();
     if (active) return active;
@@ -712,11 +860,13 @@ function jsonOut_(obj) {
 
 function doGet(e) {
   try {
-    var ss = getSpreadsheet_();
+    var targetId = (e && e.parameter && e.parameter.spreadsheetId) ? e.parameter.spreadsheetId : '';
+    var ss = getSpreadsheet_(targetId);
     var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'ping';
     if (action === 'getAll') {
       return jsonOut_({
         ok: true,
+        spreadsheetId: ss.getId(),
         spreadsheetTitle: ss.getName(),
         sheets: ss.getSheets().map(function(s) { return s.getName(); }),
         data: {
@@ -726,7 +876,7 @@ function doGet(e) {
         }
       });
     }
-    return jsonOut_({ ok: true, message: 'Silapa74 Google Sheets Bridge Ready', title: ss.getName() });
+    return jsonOut_({ ok: true, message: 'Silapa74 Google Sheets Bridge Ready', spreadsheetId: ss.getId(), title: ss.getName() });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err) });
   }
@@ -739,7 +889,7 @@ function doPost(e) {
     lock.waitLock(15000);
     var raw = (e && e.postData && e.postData.contents) ? e.postData.contents : '{}';
     var req = JSON.parse(raw);
-    var ss = getSpreadsheet_();
+    var ss = getSpreadsheet_(req.spreadsheetId || '');
     var action = req.action || 'getAll';
 
     if (action === 'initSeed' || action === 'getAll') {
@@ -749,6 +899,7 @@ function doPost(e) {
       var rSheet = ensureSheet_(ss, 'ลงทะเบียน', seed.registrations || []);
       return jsonOut_({
         ok: true,
+        spreadsheetId: ss.getId(),
         spreadsheetTitle: ss.getName(),
         sheets: ss.getSheets().map(function(s) { return s.getName(); }),
         data: {
@@ -774,7 +925,7 @@ function doPost(e) {
       } else {
         sheet.appendRow(req.rowValues);
       }
-      return jsonOut_({ ok: true });
+      return jsonOut_({ ok: true, spreadsheetId: ss.getId() });
     }
 
     if (action === 'delete') {
@@ -786,7 +937,7 @@ function doPost(e) {
           break;
         }
       }
-      return jsonOut_({ ok: true });
+      return jsonOut_({ ok: true, spreadsheetId: ss.getId() });
     }
 
     return jsonOut_({ ok: false, error: 'Unknown action: ' + action });

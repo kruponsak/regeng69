@@ -144,6 +144,23 @@ export interface ActivityLogEntry {
   details: string[];
 }
 
+export interface SheetLinkEntry {
+  id: string;
+  label: string;
+  spreadsheetId: string;
+  sheetUrl: string;
+  gasUrl: string;
+  lastActivatedAt: number;
+}
+
+export interface ActiveSheetConfig {
+  spreadsheetId: string;
+  sheetUrl: string;
+  gasUrl: string;
+  label: string;
+  lastActivatedAt: number;
+}
+
 export function isRegistrationComplete(
   reg: Pick<RegistrationRecord, 'advisors' | 'students'>
 ): boolean {
