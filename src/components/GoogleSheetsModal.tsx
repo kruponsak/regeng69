@@ -13,9 +13,9 @@ import {
   X,
 } from 'lucide-react';
 import {
-  APPS_SCRIPT_CODE,
   DEFAULT_SPREADSHEET_ID,
   SHEET_NAMES,
+  buildAppsScriptCode,
   buildGoogleSheetUrl,
 } from '../lib/sheetsDb';
 import { ActiveSheetConfig } from '../types';
@@ -88,7 +88,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
   const activeSid = activeSheetConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID;
   const activeSheetUrl = activeSheetConfig.sheetUrl || buildGoogleSheetUrl(activeSid);
-  const activeGasUrl = activeSheetConfig.gasUrl || '';
+  const appsScriptCode = buildAppsScriptCode(activeSid);
 
   const requiredTabs = [
     SHEET_NAMES.USERS,
@@ -98,7 +98,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
   const handleCopyCode = async () => {
     try {
-      await navigator.clipboard.writeText(APPS_SCRIPT_CODE);
+      await navigator.clipboard.writeText(appsScriptCode);
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2500);
     } catch {
@@ -110,7 +110,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
     try {
       const params = new URLSearchParams();
       if (activeSid) params.set('sheet', activeSid);
-      if (activeGasUrl.trim()) params.set('gas', activeGasUrl.trim());
+      if (activeSheetConfig.gasUrl?.trim()) params.set('gas', activeSheetConfig.gasUrl.trim());
       const shareUrl = `${window.location.origin}/?${params.toString()}`;
       await navigator.clipboard.writeText(shareUrl);
       setCopiedShareLink(true);
@@ -402,7 +402,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
             </ol>
 
             <pre className="max-h-48 overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-100">
-              {APPS_SCRIPT_CODE}
+              {appsScriptCode}
             </pre>
           </div>
         </div>

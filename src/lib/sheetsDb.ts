@@ -19,14 +19,16 @@ import {
   INITIAL_USERS,
 } from './seedData';
 
-export const DEFAULT_SPREADSHEET_ID = '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE';
+export const DEFAULT_SPREADSHEET_ID = (
+  (import.meta as any).env?.VITE_DEFAULT_SPREADSHEET_ID ||
+  '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE'
+).trim();
 export const DEFAULT_APPS_SCRIPT_URL = (
   (import.meta as any).env?.VITE_APPS_SCRIPT_URL || ''
 ).trim();
 export const CATEGORY_GROUPS_ROW_ID = '__CATEGORY_GROUPS__';
 export const SITE_SETTINGS_ROW_ID = '__SITE_SETTINGS__';
 export const GAS_URL_ROW_ID = '__GAS_URL__';
-export const ACTIVE_SHEET_LINK_ROW_ID = '__ACTIVE_SHEET_LINK__';
 export const LOG_ROW_PREFIX = '__LOG__';
 export const LOG_ROW_MARKER = '__LOG__';
 
@@ -46,7 +48,6 @@ export interface SheetDatabaseState {
   siteSettings: SiteSettings;
   logs: ActivityLogEntry[];
   discoveredGasUrl?: string;
-  activeSheetLink?: ActiveSheetConfig | null;
   spreadsheetId?: string;
   spreadsheetTitle?: string;
   sheets?: string[];
@@ -141,19 +142,6 @@ export function serializeSiteSettingsRow(settings: SiteSettings): string[] {
   ];
 }
 
-export function serializeActiveSheetLinkRow(config: ActiveSheetConfig): string[] {
-  return [
-    ACTIVE_SHEET_LINK_ROW_ID,
-    '__CONFIG__',
-    '',
-    JSON.stringify(config),
-    '',
-    '',
-    '',
-    new Date(config.lastActivatedAt || Date.now()).toISOString(),
-  ];
-}
-
 export function serializeLogRow(log: ActivityLogEntry): string[] {
   return [
     log.id,
@@ -244,33 +232,6 @@ function parseDiscoveredGasUrl(rows: any[][]): string {
     .find((row) => String(row[0] || '') === GAS_URL_ROW_ID);
   const candidate = String(configRow?.[3] || '').trim();
   return isValidAppsScriptUrl(candidate) ? candidate : '';
-}
-
-function parseActiveSheetLink(rows: any[][]): ActiveSheetConfig | null {
-  if (!Array.isArray(rows) || rows.length <= 1) return null;
-  const configRow = rows
-    .slice(1)
-    .find((row) => String(row[0] || '') === ACTIVE_SHEET_LINK_ROW_ID);
-  if (!configRow || !configRow[3]) return null;
-  try {
-    const parsed = JSON.parse(String(configRow[3]));
-    if (!parsed || typeof parsed !== 'object') return null;
-    const spreadsheetId = extractSpreadsheetId(String(parsed.spreadsheetId || parsed.sheetUrl || ''));
-    const gasUrl = isValidAppsScriptUrl(String(parsed.gasUrl || ''))
-      ? String(parsed.gasUrl).trim()
-      : '';
-    if (!spreadsheetId && !gasUrl) return null;
-    const lastActivatedAt = Number(parsed.lastActivatedAt) || 0;
-    return {
-      spreadsheetId,
-      sheetUrl: spreadsheetId ? buildGoogleSheetUrl(spreadsheetId) : '',
-      gasUrl,
-      label: typeof parsed.label === 'string' ? parsed.label.trim() : '',
-      lastActivatedAt,
-    };
-  } catch {
-    return null;
-  }
 }
 
 function parseSiteSettings(rows: any[][]): SiteSettings {
@@ -576,7 +537,6 @@ export async function fetchAllFromAppsScript(
   const siteSettings = parseSiteSettings(compRawRows);
   const logs = parseActivityLogs(compRawRows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRawRows);
-  const activeSheetLink = parseActiveSheetLink(compRawRows);
   const registrations = parseRegistrations(json.data?.['ลงทะเบียน'] || []);
 
   // Ensure default admin account always exists in memory
@@ -593,7 +553,6 @@ export async function fetchAllFromAppsScript(
     siteSettings,
     logs,
     discoveredGasUrl,
-    activeSheetLink,
     spreadsheetId: String(json.spreadsheetId || targetSpreadsheetId || '').trim() || undefined,
     spreadsheetTitle: json.spreadsheetTitle,
     sheets: json.sheets || [],
@@ -698,7 +657,6 @@ export async function fetchAllFromPublicSheetCsv(
   const siteSettings = parseSiteSettings(compRes.rows);
   const logs = parseActivityLogs(compRes.rows);
   const discoveredGasUrl = parseDiscoveredGasUrl(compRes.rows);
-  const activeSheetLink = parseActiveSheetLink(compRes.rows);
   const registrations = parseRegistrations(regRes.rows);
 
   const hasAdmin = users.some((u) => u.username === 'admin' && u.role === 'admin');
@@ -719,7 +677,6 @@ export async function fetchAllFromPublicSheetCsv(
     siteSettings,
     logs,
     discoveredGasUrl,
-    activeSheetLink,
     spreadsheetId: cleanId,
     spreadsheetTitle: 'Google Sheets (ซิงค์อัตโนมัติ)',
     sheets,
@@ -756,8 +713,10 @@ export async function deleteRowViaAppsScript(
   });
 }
 
-export const APPS_SCRIPT_CODE = `// วางโค้ดนี้ใน ส่วนขยาย (Extensions) > Apps Script ของ Google Sheets
-const SPREADSHEET_ID = '${DEFAULT_SPREADSHEET_ID}';
+export function buildAppsScriptCode(spreadsheetId?: string): string {
+  const targetId = extractSpreadsheetId(spreadsheetId || '') || DEFAULT_SPREADSHEET_ID;
+  return `// วางโค้ดนี้ใน ส่วนขยาย (Extensions) > Apps Script ของ Google Sheets
+const SPREADSHEET_ID = '${targetId}';
 
 const HEADERS = {
   'user': ['id', 'username', 'password', 'role', 'schoolName', 'createdAt'],
@@ -893,8 +852,16 @@ function doPost(e) {
     }
   }
 }`;
+}
 
-export async function fetchServerSheetConfig(): Promise<ActiveSheetConfig | null> {
+export const APPS_SCRIPT_CODE = buildAppsScriptCode(DEFAULT_SPREADSHEET_ID);
+
+export interface ServerSheetConfigResponse {
+  instanceId: string;
+  activeSheetConfig: ActiveSheetConfig;
+}
+
+export async function fetchServerSheetConfig(): Promise<ServerSheetConfigResponse | null> {
   try {
     const res = await fetch(`/api/sheet-config?_t=${Date.now()}`, {
       method: 'GET',
@@ -903,7 +870,10 @@ export async function fetchServerSheetConfig(): Promise<ActiveSheetConfig | null
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || !json.ok || !json.activeSheetConfig) return null;
-    return json.activeSheetConfig as ActiveSheetConfig;
+    return {
+      instanceId: typeof json.instanceId === 'string' ? json.instanceId : '',
+      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
+    };
   } catch {
     return null;
   }
@@ -911,7 +881,7 @@ export async function fetchServerSheetConfig(): Promise<ActiveSheetConfig | null
 
 export async function saveServerSheetConfig(
   activeSheetConfig: ActiveSheetConfig
-): Promise<ActiveSheetConfig | null> {
+): Promise<ServerSheetConfigResponse | null> {
   try {
     const res = await fetch('/api/sheet-config', {
       method: 'POST',
@@ -921,7 +891,10 @@ export async function saveServerSheetConfig(
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || !json.ok || !json.activeSheetConfig) return null;
-    return json.activeSheetConfig as ActiveSheetConfig;
+    return {
+      instanceId: typeof json.instanceId === 'string' ? json.instanceId : '',
+      activeSheetConfig: json.activeSheetConfig as ActiveSheetConfig,
+    };
   } catch {
     return null;
   }

@@ -20,7 +20,6 @@ import {
   INITIAL_USERS,
 } from './lib/seedData';
 import {
-  ACTIVE_SHEET_LINK_ROW_ID,
   CATEGORY_GROUPS_ROW_ID,
   DEFAULT_APPS_SCRIPT_URL,
   DEFAULT_SPREADSHEET_ID,
@@ -37,7 +36,6 @@ import {
   fetchServerSheetConfig,
   isValidAppsScriptUrl,
   saveServerSheetConfig,
-  serializeActiveSheetLinkRow,
   serializeCategoryGroupsRow,
   serializeCompetitionRow,
   serializeGasUrlRow,
@@ -54,11 +52,22 @@ import { AdminCentralScreen } from './components/AdminCentralScreen';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
 
-const GAS_URL_STORAGE_KEY = 'silapa74_gas_webapp_url';
-const ACTIVE_SHEET_CONFIG_STORAGE_KEY = 'silapa74_active_sheet_config';
-const CATEGORY_GROUPS_STORAGE_KEY = 'silapa74_category_groups';
-const SITE_SETTINGS_STORAGE_KEY = 'silapa74_site_settings';
-const ACTIVITY_LOGS_STORAGE_KEY = 'silapa74_activity_logs';
+const APP_PATH_SCOPE = (() => {
+  try {
+    const clean = (window.location.pathname || '/').replace(/\/+$/, '');
+    return clean ? clean.replace(/[^a-zA-Z0-9_-]/g, '_') : 'root';
+  } catch {
+    return 'root';
+  }
+})();
+
+const STORAGE_PREFIX = `silapa74_${APP_PATH_SCOPE}`;
+const SERVER_INSTANCE_ID_STORAGE_KEY = `${STORAGE_PREFIX}_server_instance_id`;
+const GAS_URL_STORAGE_KEY = `${STORAGE_PREFIX}_gas_webapp_url`;
+const ACTIVE_SHEET_CONFIG_STORAGE_KEY = `${STORAGE_PREFIX}_active_sheet_config`;
+const CATEGORY_GROUPS_STORAGE_KEY = `${STORAGE_PREFIX}_category_groups`;
+const SITE_SETTINGS_STORAGE_KEY = `${STORAGE_PREFIX}_site_settings`;
+const ACTIVITY_LOGS_STORAGE_KEY = `${STORAGE_PREFIX}_activity_logs`;
 
 function generateNextId(prefix: string, existingIds: string[]): string {
   const nums = existingIds
@@ -295,12 +304,10 @@ export default function App() {
       options?: {
         explicitActivation?: boolean;
         silent?: boolean;
-        hopCount?: number;
       }
     ): Promise<boolean> => {
       const explicitActivation = Boolean(options?.explicitActivation);
       const silent = Boolean(options?.silent);
-      const hopCount = options?.hopCount || 0;
 
       const prevConfig = activeConfigRef.current;
       const targetSid =
@@ -373,45 +380,6 @@ export default function App() {
           ? target?.activatedAt || Date.now()
           : target?.activatedAt ?? prevConfig.lastActivatedAt ?? 0;
 
-        // Follow forwarding pointer stored in Google Sheets if newer than current link
-        const remoteActive = data.activeSheetLink;
-        if (
-          !explicitActivation &&
-          hopCount < 2 &&
-          remoteActive &&
-          remoteActive.lastActivatedAt > activatedAt
-        ) {
-          const remoteSid = extractSpreadsheetId(
-            remoteActive.spreadsheetId || remoteActive.sheetUrl || ''
-          );
-          const remoteGas = isValidAppsScriptUrl(remoteActive.gasUrl || '')
-            ? remoteActive.gasUrl.trim()
-            : '';
-          const isDifferentTarget =
-            (remoteSid && remoteSid !== resolvedSid) ||
-            (remoteGas && remoteGas !== resolvedGas);
-
-          if (isDifferentTarget) {
-            const followedConfig: ActiveSheetConfig = {
-              spreadsheetId: remoteSid || resolvedSid,
-              sheetUrl: buildGoogleSheetUrl(remoteSid || resolvedSid),
-              gasUrl: remoteGas,
-              label: remoteActive.label || 'Google Sheets หลัก',
-              lastActivatedAt: remoteActive.lastActivatedAt,
-            };
-            persistActiveConfigLocally(followedConfig);
-            return await syncSheetDatabase(
-              {
-                spreadsheetId: followedConfig.spreadsheetId,
-                gasUrl: followedConfig.gasUrl,
-                label: followedConfig.label,
-                activatedAt: followedConfig.lastActivatedAt,
-              },
-              { explicitActivation: false, silent, hopCount: hopCount + 1 }
-            );
-          }
-        }
-
         const resolvedLabel =
           (target?.label && target.label.trim()) ||
           (data.spreadsheetTitle &&
@@ -431,41 +399,16 @@ export default function App() {
         applySheetData(data);
         persistActiveConfigLocally(nextConfig);
 
-        // When admin puts in a new link, replace the single link on server + forwarding pointer immediately
+        // Save strictly to this repository's own server config and target sheet's GAS URL (never to previous/other sheets)
         if (explicitActivation) {
-          saveServerSheetConfig(nextConfig).catch(() => {});
-
-          const writeTargets: Array<{ gUrl: string; sId: string }> = [];
-          if (resolvedGas) {
-            writeTargets.push({ gUrl: resolvedGas, sId: resolvedSid });
-          }
-          if (
-            prevConfig.gasUrl &&
-            isValidAppsScriptUrl(prevConfig.gasUrl) &&
-            (prevConfig.spreadsheetId !== resolvedSid || prevConfig.gasUrl !== resolvedGas)
-          ) {
-            writeTargets.push({
-              gUrl: prevConfig.gasUrl,
-              sId: prevConfig.spreadsheetId || DEFAULT_SPREADSHEET_ID,
-            });
-          }
-
-          for (const wt of writeTargets) {
-            if (wt.sId === resolvedSid && resolvedGas && data.discoveredGasUrl !== resolvedGas) {
-              upsertRowViaAppsScript(
-                wt.gUrl,
-                SHEET_NAMES.COMPETITIONS,
-                GAS_URL_ROW_ID,
-                serializeGasUrlRow(resolvedGas),
-                wt.sId
-              ).catch(() => {});
-            }
+          await saveServerSheetConfig(nextConfig);
+          if (resolvedGas && data.discoveredGasUrl !== resolvedGas) {
             upsertRowViaAppsScript(
-              wt.gUrl,
+              resolvedGas,
               SHEET_NAMES.COMPETITIONS,
-              ACTIVE_SHEET_LINK_ROW_ID,
-              serializeActiveSheetLinkRow(nextConfig),
-              wt.sId
+              GAS_URL_ROW_ID,
+              serializeGasUrlRow(resolvedGas),
+              resolvedSid
             ).catch(() => {});
           }
         } else if (resolvedGas && data.discoveredGasUrl !== resolvedGas) {
@@ -496,18 +439,36 @@ export default function App() {
 
   const syncWithServerDefaultAndSheets = useCallback(
     async (silent: boolean) => {
-      const srv = await fetchServerSheetConfig();
-      if (srv) {
+      const serverRes = await fetchServerSheetConfig();
+      if (serverRes) {
+        const { instanceId, activeSheetConfig: srv } = serverRes;
+        let instanceChanged = false;
+        try {
+          const prevInstanceId = localStorage.getItem(SERVER_INSTANCE_ID_STORAGE_KEY) || '';
+          if (instanceId && prevInstanceId && prevInstanceId !== instanceId) {
+            instanceChanged = true;
+            localStorage.removeItem(CATEGORY_GROUPS_STORAGE_KEY);
+            localStorage.removeItem(SITE_SETTINGS_STORAGE_KEY);
+            localStorage.removeItem(ACTIVITY_LOGS_STORAGE_KEY);
+          }
+          if (instanceId) {
+            localStorage.setItem(SERVER_INSTANCE_ID_STORAGE_KEY, instanceId);
+          }
+        } catch {
+          // ignore storage error
+        }
+
         const loc = activeConfigRef.current;
         const isDifferent =
           srv.spreadsheetId !== loc.spreadsheetId ||
           srv.gasUrl !== loc.gasUrl ||
           srv.label !== loc.label;
         const shouldAdopt =
+          instanceChanged ||
           srv.lastActivatedAt >= (loc.lastActivatedAt || 0) ||
           (srv.lastActivatedAt > 0 && isDifferent);
 
-        if (shouldAdopt && (isDifferent || srv.lastActivatedAt !== loc.lastActivatedAt)) {
+        if (shouldAdopt && (instanceChanged || isDifferent || srv.lastActivatedAt !== loc.lastActivatedAt)) {
           persistActiveConfigLocally(srv);
         }
       }
@@ -559,7 +520,7 @@ export default function App() {
     };
   }, [syncWithServerDefaultAndSheets]);
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
     const fallbackConfig: ActiveSheetConfig = {
       spreadsheetId: DEFAULT_SPREADSHEET_ID,
       sheetUrl: buildGoogleSheetUrl(DEFAULT_SPREADSHEET_ID),
@@ -568,9 +529,9 @@ export default function App() {
       lastActivatedAt: Date.now(),
     };
     persistActiveConfigLocally(fallbackConfig);
-    saveServerSheetConfig(fallbackConfig).catch(() => {});
+    await saveServerSheetConfig(fallbackConfig);
     setSyncError(null);
-    syncSheetDatabase(
+    await syncSheetDatabase(
       {
         spreadsheetId: fallbackConfig.spreadsheetId,
         gasUrl: fallbackConfig.gasUrl,
@@ -645,7 +606,7 @@ export default function App() {
           actorRole: currentUser?.role || 'admin',
           action: 'update',
           targetType: 'settings',
-          targetId: ACTIVE_SHEET_LINK_ROW_ID,
+          targetId: finalCfg.spreadsheetId,
           targetTitle: finalCfg.label || finalCfg.spreadsheetId,
           summary: `แทนค่าลิงก์ Google Sheets หลักเป็น "${finalCfg.label || finalCfg.spreadsheetId}"`,
           details: [

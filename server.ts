@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -10,8 +11,18 @@ interface StoredActiveSheetConfig {
   lastActivatedAt: number;
 }
 
-const DEFAULT_SPREADSHEET_ID = '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE';
+interface StoredServerSheetState {
+  instanceId: string;
+  activeSheetConfig: StoredActiveSheetConfig;
+}
+
+const DEFAULT_SPREADSHEET_ID = (
+  process.env.VITE_DEFAULT_SPREADSHEET_ID ||
+  process.env.DEFAULT_SPREADSHEET_ID ||
+  '1RauGo4xOfKS9xG17azBQpPbi-IgPBaBeUKEjU1Qg9NE'
+).trim();
 const DEFAULT_GAS_URL = (process.env.VITE_APPS_SCRIPT_URL || '').trim();
+const ENV_INSTANCE_ID = (process.env.APP_INSTANCE_ID || '').trim();
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'sheet-config.json');
 
@@ -65,27 +76,52 @@ function sanitizeConfig(raw: any): StoredActiveSheetConfig | null {
     sheetUrl: buildGoogleSheetUrl(finalSid),
     gasUrl: gUrl,
     label: typeof raw.label === 'string' ? raw.label.trim() : '',
-    lastActivatedAt: Number(raw.lastActivatedAt) || Date.now(),
+    lastActivatedAt: Number(raw.lastActivatedAt) || 0,
   };
 }
 
-function readStoredConfig(): StoredActiveSheetConfig {
+function writeStoredState(state: StoredServerSheetState): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function readStoredState(): StoredServerSheetState {
   try {
     if (!fs.existsSync(CONFIG_FILE)) {
-      return createDefaultConfig();
+      const initial: StoredServerSheetState = {
+        instanceId: ENV_INSTANCE_ID || crypto.randomUUID(),
+        activeSheetConfig: createDefaultConfig(),
+      };
+      try {
+        writeStoredState(initial);
+      } catch {
+        // ignore write failure on read-only filesystem
+      }
+      return initial;
     }
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
     const parsed = JSON.parse(raw);
-    const cfg = sanitizeConfig(parsed?.activeSheetConfig ?? parsed);
-    return cfg || createDefaultConfig();
+    const instanceId =
+      ENV_INSTANCE_ID ||
+      (typeof parsed?.instanceId === 'string' && parsed.instanceId.trim()
+        ? parsed.instanceId.trim()
+        : crypto.randomUUID());
+    const cfg = sanitizeConfig(parsed?.activeSheetConfig ?? parsed) || createDefaultConfig();
+    const state: StoredServerSheetState = { instanceId, activeSheetConfig: cfg };
+    if (!parsed?.instanceId) {
+      try {
+        writeStoredState(state);
+      } catch {
+        // ignore write failure
+      }
+    }
+    return state;
   } catch {
-    return createDefaultConfig();
+    return {
+      instanceId: ENV_INSTANCE_ID || crypto.randomUUID(),
+      activeSheetConfig: createDefaultConfig(),
+    };
   }
-}
-
-function writeStoredConfig(activeSheetConfig: StoredActiveSheetConfig): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ activeSheetConfig }, null, 2), 'utf8');
 }
 
 async function startServer() {
@@ -94,10 +130,11 @@ async function startServer() {
 
   app.get('/api/sheet-config', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    const activeSheetConfig = readStoredConfig();
+    const state = readStoredState();
     res.json({
       ok: true,
-      activeSheetConfig,
+      instanceId: state.instanceId,
+      activeSheetConfig: state.activeSheetConfig,
     });
   });
 
@@ -109,16 +146,22 @@ async function startServer() {
       return;
     }
 
+    const currentState = readStoredState();
     const nextActive: StoredActiveSheetConfig = {
       ...incomingConfig,
       lastActivatedAt: incomingConfig.lastActivatedAt || Date.now(),
     };
+    const nextState: StoredServerSheetState = {
+      instanceId: currentState.instanceId,
+      activeSheetConfig: nextActive,
+    };
 
     try {
-      writeStoredConfig(nextActive);
+      writeStoredState(nextState);
       res.json({
         ok: true,
-        activeSheetConfig: nextActive,
+        instanceId: nextState.instanceId,
+        activeSheetConfig: nextState.activeSheetConfig,
       });
     } catch (err: any) {
       res.status(500).json({
