@@ -12,6 +12,8 @@ import {
   SiteSettings,
   TransitionType,
   UserAccount,
+  formatThaiDateTime,
+  getRegistrationStatus,
   isRegistrationComplete,
 } from './types';
 import {
@@ -127,6 +129,30 @@ export default function App() {
     }
     return [];
   });
+
+  // Live clock for scheduled registration auto-close
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const rawCloseAt = (siteSettings.registrationCloseAt || '').trim();
+    const closeAtMs = rawCloseAt ? Date.parse(rawCloseAt) : NaN;
+    if (
+      siteSettings.registrationManualStatus === 'closed' ||
+      Number.isNaN(closeAtMs) ||
+      Date.now() >= closeAtMs
+    ) {
+      setNowMs(Date.now());
+      return;
+    }
+    setNowMs(Date.now());
+    const id = window.setInterval(() => {
+      const current = Date.now();
+      setNowMs(current);
+      if (current >= closeAtMs) {
+        window.clearInterval(id);
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [siteSettings.registrationCloseAt, siteSettings.registrationManualStatus]);
 
   // Authenticated App User (admin or school admin)
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
@@ -790,6 +816,10 @@ export default function App() {
         heroHeading: nextSettings.heroHeading.trim() || DEFAULT_SITE_SETTINGS.heroHeading,
         heroDescription: nextSettings.heroDescription.trim(),
         footerText: nextSettings.footerText.trim() || DEFAULT_SITE_SETTINGS.footerText,
+        registrationManualStatus:
+          nextSettings.registrationManualStatus === 'closed' ? 'closed' : 'open',
+        registrationCloseAt: (nextSettings.registrationCloseAt || '').trim(),
+        registrationClosedMessage: (nextSettings.registrationClosedMessage || '').trim(),
       };
 
       setSiteSettings(sanitized);
@@ -809,7 +839,7 @@ export default function App() {
             spreadsheetIdRef.current
           );
         } catch (err: any) {
-          setSyncError(err?.message || 'บันทึกการตั้งค่าหัวเรื่องลง Google Sheets ไม่สำเร็จ');
+          setSyncError(err?.message || 'บันทึกการตั้งค่าลง Google Sheets ไม่สำเร็จ');
           if (currentUser?.role === 'admin') setIsSheetsModalOpen(true);
           return false;
         }
@@ -835,13 +865,46 @@ export default function App() {
       if (prevSettings.footerText !== sanitized.footerText) {
         diffs.push(`ข้อความส่วนท้าย: "${prevSettings.footerText}" → "${sanitized.footerText}"`);
       }
+      const prevManual = prevSettings.registrationManualStatus === 'closed' ? 'ปิด' : 'เปิด';
+      const nextManual = sanitized.registrationManualStatus === 'closed' ? 'ปิด' : 'เปิด';
+      if (prevManual !== nextManual) {
+        diffs.push(`สถานะการลงทะเบียน (สั่งการด้วยตนเอง): ${prevManual} → ${nextManual}`);
+      }
+      if ((prevSettings.registrationCloseAt || '') !== (sanitized.registrationCloseAt || '')) {
+        diffs.push(
+          `กำหนดวันเวลาปิดลงทะเบียนอัตโนมัติ: "${
+            formatThaiDateTime(prevSettings.registrationCloseAt) || 'ไม่กำหนด'
+          }" → "${formatThaiDateTime(sanitized.registrationCloseAt) || 'ไม่กำหนด'}"`
+        );
+      }
+      if (
+        (prevSettings.registrationClosedMessage || '') !==
+        (sanitized.registrationClosedMessage || '')
+      ) {
+        diffs.push('แก้ไขข้อความแจ้งเตือนเมื่อปิดรับลงทะเบียน');
+      }
+
+      const regOnlyChange =
+        prevSettings.siteTitle === sanitized.siteTitle &&
+        prevSettings.siteSubtitle === sanitized.siteSubtitle &&
+        prevSettings.heroHeading === sanitized.heroHeading &&
+        prevSettings.heroDescription === sanitized.heroDescription &&
+        prevSettings.footerText === sanitized.footerText;
 
       recordActivityLog({
         action: 'update',
         targetType: 'settings',
         targetId: SITE_SETTINGS_ROW_ID,
-        targetTitle: sanitized.siteTitle,
-        summary: `แก้ไขหัวเรื่องและรายละเอียดหน้าเว็บ "${sanitized.siteTitle}"`,
+        targetTitle: regOnlyChange ? 'ควบคุมการเปิด-ปิดลงทะเบียน' : sanitized.siteTitle,
+        summary: regOnlyChange
+          ? `อัปเดตสถานะการลงทะเบียน: ${
+              sanitized.registrationManualStatus === 'closed'
+                ? 'สั่งปิดรับลงทะเบียน'
+                : sanitized.registrationCloseAt
+                ? `เปิดรับถึง ${formatThaiDateTime(sanitized.registrationCloseAt)}`
+                : 'เปิดรับลงทะเบียน'
+            }`
+          : `แก้ไขหัวเรื่องและรายละเอียดหน้าเว็บ "${sanitized.siteTitle}"`,
         details: diffs.length > 0 ? diffs : ['บันทึกอัปเดตการตั้งค่าหน้าเว็บ'],
       });
       return true;
@@ -1165,6 +1228,21 @@ export default function App() {
     data: Omit<RegistrationRecord, 'id' | 'createdAt' | 'updatedAt'>,
     existingId?: string
   ): Promise<boolean> => {
+    const regStatus = getRegistrationStatus(siteSettings, Date.now());
+    if (currentUser?.role !== 'admin' && regStatus.isClosed) {
+      requestConfirmation({
+        title: 'ระบบปิดรับการลงทะเบียนแล้ว',
+        description: regStatus.closedMessage,
+        details: regStatus.closeAtMs
+          ? [`• กำหนดปิดรับลงทะเบียน: ${formatThaiDateTime(regStatus.closeAtMs)}`]
+          : [],
+        confirmLabel: 'รับทราบ',
+        tone: 'primary',
+        onConfirm: () => {},
+      });
+      return false;
+    }
+
     const now = new Date().toISOString();
     const existing = existingId
       ? registrations.find((r) => r.id === existingId)
@@ -1271,6 +1349,21 @@ export default function App() {
   };
 
   const handleDeleteRegistration = (reg: RegistrationRecord) => {
+    const regStatus = getRegistrationStatus(siteSettings, Date.now());
+    if (currentUser?.role !== 'admin' && regStatus.isClosed) {
+      requestConfirmation({
+        title: 'ระบบปิดรับการลงทะเบียนแล้ว',
+        description: regStatus.closedMessage,
+        details: regStatus.closeAtMs
+          ? [`• กำหนดปิดรับลงทะเบียน: ${formatThaiDateTime(regStatus.closeAtMs)}`]
+          : [],
+        confirmLabel: 'รับทราบ',
+        tone: 'primary',
+        onConfirm: () => {},
+      });
+      return;
+    }
+
     requestConfirmation({
       title: 'ยืนยันการลบข้อมูลการลงทะเบียน',
       description: `คุณต้องการลบการลงทะเบียนรายการ "${reg.mainActivity}" ของ ${reg.schoolName} ออกจากชีท "${SHEET_NAMES.REGISTRATIONS}" ใช่หรือไม่`,
@@ -1342,6 +1435,7 @@ export default function App() {
               users={users}
               categoryGroups={categoryGroups}
               siteSettings={siteSettings}
+              nowMs={nowMs}
               currentUser={currentUser}
               isGoogleConnected={isConnected}
               isSyncing={isSyncing}
@@ -1366,6 +1460,7 @@ export default function App() {
               registrations={registrations}
               categoryGroups={categoryGroups}
               siteSettings={siteSettings}
+              nowMs={nowMs}
               onNavigate={handleNavigate}
               onLoginSuccess={handleLoginSuccess}
               onLogout={handleLogout}
@@ -1382,6 +1477,7 @@ export default function App() {
               registrations={registrations}
               categoryGroups={categoryGroups}
               siteSettings={siteSettings}
+              nowMs={nowMs}
               activityLogs={activityLogs}
               isGoogleConnected={isConnected}
               spreadsheetId={activeSpreadsheetId}

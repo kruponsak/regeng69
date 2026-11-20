@@ -274,6 +274,16 @@ function parseSiteSettings(rows: any[][]): SiteSettings {
         typeof parsed.footerText === 'string' && parsed.footerText.trim()
           ? parsed.footerText
           : DEFAULT_SITE_SETTINGS.footerText,
+      registrationManualStatus:
+        parsed.registrationManualStatus === 'closed' ? 'closed' : 'open',
+      registrationCloseAt:
+        typeof parsed.registrationCloseAt === 'string'
+          ? parsed.registrationCloseAt.trim()
+          : '',
+      registrationClosedMessage:
+        typeof parsed.registrationClosedMessage === 'string'
+          ? parsed.registrationClosedMessage.trim()
+          : '',
     };
   } catch {
     return { ...DEFAULT_SITE_SETTINGS };

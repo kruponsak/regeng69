@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   Building2,
+  CalendarClock,
   CheckCircle2,
   ClipboardList,
   Clock,
@@ -23,6 +24,7 @@ import {
   ShieldCheck,
   Trash2,
   Trophy,
+  Unlock,
   Users,
 } from 'lucide-react';
 import {
@@ -41,7 +43,12 @@ import {
   SiteSettings,
   TransitionType,
   UserAccount,
+  formatCountdownThai,
+  formatThaiDateTime,
+  fromDateTimeLocalValue,
+  getRegistrationStatus,
   isRegistrationComplete,
+  toDateTimeLocalValue,
 } from '../types';
 
 interface AdminCentralScreenProps {
@@ -51,6 +58,7 @@ interface AdminCentralScreenProps {
   registrations: RegistrationRecord[];
   categoryGroups: string[];
   siteSettings: SiteSettings;
+  nowMs: number;
   activityLogs: ActivityLogEntry[];
   isGoogleConnected: boolean;
   spreadsheetId: string;
@@ -182,6 +190,7 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
   registrations,
   categoryGroups,
   siteSettings,
+  nowMs,
   activityLogs,
   isGoogleConnected,
   spreadsheetId,
@@ -264,13 +273,122 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
 
+  // Registration Open/Close & Auto-Close Schedule State
+  const [regCloseAtInput, setRegCloseAtInput] = useState<string>(() =>
+    toDateTimeLocalValue(siteSettings.registrationCloseAt)
+  );
+  const [regClosedMsgInput, setRegClosedMsgInput] = useState<string>(
+    siteSettings.registrationClosedMessage || ''
+  );
+  const [isSavingRegControl, setIsSavingRegControl] = useState(false);
+  const [regControlError, setRegControlError] = useState<string | null>(null);
+  const [regControlSuccess, setRegControlSuccess] = useState<string | null>(null);
+
   useEffect(() => {
     setSiteTitleInput(siteSettings.siteTitle);
     setSiteSubtitleInput(siteSettings.siteSubtitle);
     setHeroHeadingInput(siteSettings.heroHeading);
     setHeroDescriptionInput(siteSettings.heroDescription);
     setFooterTextInput(siteSettings.footerText);
+    setRegCloseAtInput(toDateTimeLocalValue(siteSettings.registrationCloseAt));
+    setRegClosedMsgInput(siteSettings.registrationClosedMessage || '');
   }, [siteSettings]);
+
+  const registrationStatus = useMemo(
+    () => getRegistrationStatus(siteSettings, nowMs),
+    [siteSettings, nowMs]
+  );
+
+  const handleToggleManualRegistration = async () => {
+    setRegControlError(null);
+    setRegControlSuccess(null);
+    setIsSavingRegControl(true);
+    try {
+      const opening = registrationStatus.isClosed;
+      const existingCloseMs = siteSettings.registrationCloseAt
+        ? Date.parse(siteSettings.registrationCloseAt)
+        : NaN;
+      const shouldClearPastSchedule =
+        opening && !Number.isNaN(existingCloseMs) && existingCloseMs <= Date.now();
+
+      const ok = await onSaveSiteSettings({
+        ...siteSettings,
+        registrationManualStatus: opening ? 'open' : 'closed',
+        registrationCloseAt: shouldClearPastSchedule
+          ? ''
+          : siteSettings.registrationCloseAt || '',
+        registrationClosedMessage: regClosedMsgInput.trim(),
+      });
+
+      if (ok) {
+        setRegControlSuccess(
+          opening
+            ? shouldClearPastSchedule
+              ? 'เปิดรับการลงทะเบียนเรียบร้อยแล้ว (ล้างกำหนดเวลาปิดเดิมที่เลยกำหนดแล้ว)'
+              : 'เปิดรับการลงทะเบียนเรียบร้อยแล้ว'
+            : 'ปิดรับการลงทะเบียนเรียบร้อยแล้ว โรงเรียนจะไม่สามารถส่งหรือแก้ไขข้อมูลได้'
+        );
+      }
+    } finally {
+      setIsSavingRegControl(false);
+    }
+  };
+
+  const handleSaveScheduledClose = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegControlError(null);
+    setRegControlSuccess(null);
+
+    const isoCloseAt = fromDateTimeLocalValue(regCloseAtInput);
+    if (!isoCloseAt) {
+      setRegControlError('กรุณาเลือกวันและเวลาที่ต้องการให้ระบบปิดรับลงทะเบียนอัตโนมัติ');
+      return;
+    }
+
+    const targetMs = Date.parse(isoCloseAt);
+    if (Number.isNaN(targetMs) || targetMs <= Date.now()) {
+      setRegControlError(
+        'กรุณาเลือกวันและเวลาในอนาคต (หากต้องการปิดทันที ให้กดปุ่ม "ปิดรับลงทะเบียนทันที")'
+      );
+      return;
+    }
+
+    setIsSavingRegControl(true);
+    try {
+      const ok = await onSaveSiteSettings({
+        ...siteSettings,
+        registrationManualStatus: 'open',
+        registrationCloseAt: isoCloseAt,
+        registrationClosedMessage: regClosedMsgInput.trim(),
+      });
+      if (ok) {
+        setRegControlSuccess(
+          `ตั้งเวลาปิดรับลงทะเบียนอัตโนมัติเป็น ${formatThaiDateTime(isoCloseAt)} เรียบร้อยแล้ว`
+        );
+      }
+    } finally {
+      setIsSavingRegControl(false);
+    }
+  };
+
+  const handleClearScheduledClose = async () => {
+    setRegControlError(null);
+    setRegControlSuccess(null);
+    setIsSavingRegControl(true);
+    try {
+      const ok = await onSaveSiteSettings({
+        ...siteSettings,
+        registrationCloseAt: '',
+        registrationClosedMessage: regClosedMsgInput.trim(),
+      });
+      if (ok) {
+        setRegCloseAtInput('');
+        setRegControlSuccess('ยกเลิกการตั้งเวลาปิดรับลงทะเบียนอัตโนมัติเรียบร้อยแล้ว');
+      }
+    } finally {
+      setIsSavingRegControl(false);
+    }
+  };
 
   const allCategoryOptions = useMemo(() => {
     const ordered = [...categoryGroups];
@@ -1053,6 +1171,144 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
             </section>
           ) : (
             <>
+              {/* Registration Open/Close & Scheduled Auto-Close Control Card */}
+              <section className="rounded-xl border border-slate-200 bg-white p-5">
+                <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <h2 className="font-display text-sm font-bold text-slate-900">
+                        ควบคุมการเปิด-ปิดรับลงทะเบียน (ระบบโรงเรียน)
+                      </h2>
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-0.5 text-xs font-semibold ${
+                          registrationStatus.isClosed
+                            ? 'border-red-200 bg-red-50 text-red-800'
+                            : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`h-2 w-2 rounded-full ${
+                            registrationStatus.isClosed ? 'bg-red-600' : 'bg-emerald-600'
+                          }`}
+                        />
+                        {registrationStatus.isClosed
+                          ? 'ปิดรับลงทะเบียนแล้ว'
+                          : 'เปิดรับลงทะเบียนอยู่'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-600">
+                      {registrationStatus.reason === 'manual' &&
+                        'ปิดด้วยตนเองโดยผู้ดูแลระบบ (โรงเรียนไม่สามารถส่ง แก้ไข หรือลบข้อมูลได้)'}
+                      {registrationStatus.reason === 'scheduled' &&
+                        `ปิดอัตโนมัติเนื่องจากครบกำหนดเวลา ${formatThaiDateTime(
+                          registrationStatus.closeAtMs
+                        )}`}
+                      {registrationStatus.reason === 'open_scheduled' &&
+                        `กำหนดปิดรับอัตโนมัติ: ${formatThaiDateTime(
+                          registrationStatus.closeAtMs
+                        )} (เหลือเวลาอีก ${formatCountdownThai(
+                          registrationStatus.remainingMs || 0
+                        )})`}
+                      {registrationStatus.reason === 'open' &&
+                        'เปิดรับการลงทะเบียนตามปกติ (ยังไม่ได้ตั้งเวลาปิดอัตโนมัติ)'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleManualRegistration}
+                    disabled={isSavingRegControl}
+                    className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
+                      registrationStatus.isClosed
+                        ? 'bg-emerald-700 hover:bg-emerald-800'
+                        : 'bg-red-600 hover:bg-red-700'
+                    }`}
+                  >
+                    {registrationStatus.isClosed ? (
+                      <>
+                        <Unlock className="h-3.5 w-3.5" />
+                        เปิดรับลงทะเบียน
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-3.5 w-3.5" />
+                        ปิดรับลงทะเบียนทันที
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <form
+                  onSubmit={handleSaveScheduledClose}
+                  className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-end"
+                >
+                  <div className="lg:col-span-4">
+                    <label
+                      htmlFor="admin-reg-close-at"
+                      className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-700"
+                    >
+                      <CalendarClock className="h-3.5 w-3.5 text-blue-900" />
+                      ตั้งวันและเวลาปิดลงทะเบียนอัตโนมัติ
+                    </label>
+                    <input
+                      id="admin-reg-close-at"
+                      type="datetime-local"
+                      value={regCloseAtInput}
+                      onChange={(e) => setRegCloseAtInput(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-blue-800 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="lg:col-span-4">
+                    <label
+                      htmlFor="admin-reg-closed-msg"
+                      className="mb-1 block text-xs font-medium text-slate-700"
+                    >
+                      ข้อความแจ้งเมื่อปิดลงทะเบียน (ไม่บังคับ)
+                    </label>
+                    <input
+                      id="admin-reg-closed-msg"
+                      type="text"
+                      value={regClosedMsgInput}
+                      onChange={(e) => setRegClosedMsgInput(e.target.value)}
+                      placeholder="เช่น ปิดรับสมัครแล้ว ติดต่อผู้ประสานงาน..."
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 lg:col-span-4 lg:justify-end">
+                    <button
+                      type="submit"
+                      disabled={isSavingRegControl || !regCloseAtInput}
+                      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-950 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Clock className="h-3.5 w-3.5" />
+                      {isSavingRegControl ? 'กำลังบันทึก...' : 'ตั้งเวลาปิดอัตโนมัติ'}
+                    </button>
+                    {siteSettings.registrationCloseAt && (
+                      <button
+                        type="button"
+                        onClick={handleClearScheduledClose}
+                        disabled={isSavingRegControl}
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        ยกเลิกเวลาที่ตั้ง
+                      </button>
+                    )}
+                  </div>
+                </form>
+
+                {regControlError && (
+                  <p className="mt-2.5 text-xs font-medium text-red-700">{regControlError}</p>
+                )}
+                {regControlSuccess && (
+                  <p className="mt-2.5 text-xs font-medium text-emerald-700">
+                    {regControlSuccess}
+                  </p>
+                )}
+              </section>
+
               {/* Workspace Tabs */}
               <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-white p-1.5">
                 <button
@@ -2179,6 +2435,7 @@ export const AdminCentralScreen: React.FC<AdminCentralScreenProps> = ({
                         setIsSavingSettings(true);
                         try {
                           const ok = await onSaveSiteSettings({
+                            ...siteSettings,
                             siteTitle: siteTitleInput.trim(),
                             siteSubtitle: siteSubtitleInput.trim(),
                             heroHeading: heroHeadingInput.trim(),

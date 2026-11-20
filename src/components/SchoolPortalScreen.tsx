@@ -4,8 +4,10 @@ import {
   Building2,
   CheckCircle2,
   ClipboardList,
+  Clock,
   Edit3,
   Globe,
+  Lock,
   LogOut,
   Plus,
   ShieldCheck,
@@ -25,6 +27,9 @@ import {
   StudentEntry,
   TransitionType,
   UserAccount,
+  formatCountdownThai,
+  formatThaiDateTime,
+  getRegistrationStatus,
   isRegistrationComplete,
 } from '../types';
 
@@ -35,6 +40,7 @@ interface SchoolPortalScreenProps {
   registrations: RegistrationRecord[];
   categoryGroups: string[];
   siteSettings: SiteSettings;
+  nowMs: number;
   onNavigate: (path: ScreenPath, transition: TransitionType) => void;
   onLoginSuccess: (user: UserAccount, targetScreen: ScreenPath) => void;
   onLogout: () => void;
@@ -58,12 +64,18 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
   registrations,
   categoryGroups,
   siteSettings,
+  nowMs,
   onNavigate,
   onLoginSuccess,
   onLogout,
   onSaveRegistration,
   onDeleteRegistration,
 }) => {
+  const registrationStatus = useMemo(
+    () => getRegistrationStatus(siteSettings, nowMs),
+    [siteSettings, nowMs]
+  );
+  const isRegistrationClosed = registrationStatus.isClosed;
   const schoolUsers = useMemo(
     () =>
       users
@@ -208,6 +220,10 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
   };
 
   const handleEditClick = (reg: RegistrationRecord) => {
+    if (isRegistrationClosed) {
+      setFormError(registrationStatus.closedMessage);
+      return;
+    }
     const targetComp = competitions.find((c) => c.id === reg.competitionId);
     setEditingRegId(reg.id);
     setSelectedCategoryGroup(
@@ -265,6 +281,11 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
 
     if (!isSchoolAuthenticated || !currentUser) {
       setFormError('กรุณาเข้าสู่ระบบด้วยบัญชีแอดมินโรงเรียนก่อนส่งข้อมูล');
+      return;
+    }
+
+    if (isRegistrationClosed) {
+      setFormError(registrationStatus.closedMessage);
       return;
     }
 
@@ -454,6 +475,46 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
         </header>
 
         <main className="mx-auto w-full max-w-6xl space-y-8 p-6">
+          {/* Registration Status Banner (Closed or Scheduled Countdown) */}
+          {isRegistrationClosed ? (
+            <section
+              role="alert"
+              className="flex flex-wrap items-start gap-3 rounded-xl border border-red-300 bg-red-50 px-5 py-4 text-red-900"
+            >
+              <Lock className="mt-0.5 h-5 w-5 shrink-0 text-red-700" />
+              <div className="space-y-1">
+                <h2 className="text-sm font-bold text-red-900">
+                  ปิดรับการลงทะเบียนแล้ว
+                </h2>
+                <p className="text-xs leading-relaxed text-red-800">
+                  {registrationStatus.closedMessage}
+                </p>
+                {registrationStatus.closeAtMs && (
+                  <p className="text-xs font-medium text-red-700">
+                    กำหนดปิดรับลงทะเบียน: {formatThaiDateTime(registrationStatus.closeAtMs)}
+                  </p>
+                )}
+              </div>
+            </section>
+          ) : (
+            registrationStatus.reason === 'open_scheduled' && (
+              <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-3.5 text-amber-950">
+                <div className="flex items-center gap-2.5 text-xs">
+                  <Clock className="h-4 w-4 shrink-0 text-amber-700" />
+                  <span>
+                    กำหนดปิดรับการลงทะเบียนอัตโนมัติ:{' '}
+                    <span className="font-semibold">
+                      {formatThaiDateTime(registrationStatus.closeAtMs)}
+                    </span>
+                  </span>
+                </div>
+                <span className="font-mono text-xs font-semibold text-amber-900 tabular-nums">
+                  เหลือเวลาอีก {formatCountdownThai(registrationStatus.remainingMs || 0)}
+                </span>
+              </section>
+            )
+          )}
+
           {/* School Authentication Gate if not logged in as school */}
           {!isSchoolAuthenticated && (
             <section className="rounded-xl border border-amber-300 bg-amber-50/70 p-6">
@@ -539,7 +600,11 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
               )}
             </div>
 
-            <form onSubmit={handleSubmitRegistration} className="mt-6 space-y-6">
+            <form onSubmit={handleSubmitRegistration} className="mt-6">
+              <fieldset
+                disabled={isRegistrationClosed}
+                className="space-y-6 disabled:opacity-60"
+              >
               {/* School (Locked to User) */}
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">
@@ -855,12 +920,17 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={!isSchoolAuthenticated}
+                  disabled={!isSchoolAuthenticated || isRegistrationClosed}
                   className="whitespace-nowrap rounded-lg bg-blue-900 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-950 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {editingRegId ? 'บันทึกการแก้ไขข้อมูล' : 'บันทึกการลงทะเบียน'}
+                  {isRegistrationClosed
+                    ? 'ปิดรับการลงทะเบียนแล้ว'
+                    : editingRegId
+                    ? 'บันทึกการแก้ไขข้อมูล'
+                    : 'บันทึกการลงทะเบียน'}
                 </button>
               </div>
+              </fieldset>
             </form>
           </section>
 
@@ -947,24 +1017,31 @@ export const SchoolPortalScreen: React.FC<SchoolPortalScreenProps> = ({
                             </span>
                           </td>
                           <td className="px-5 py-3.5 text-right whitespace-nowrap">
-                            <div className="inline-flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => handleEditClick(reg)}
-                                className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                              >
-                                <Edit3 className="h-3 w-3" />
-                                แก้ไข
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteRegistration(reg)}
-                                className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                                ลบ
-                              </button>
-                            </div>
+                            {isRegistrationClosed ? (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-400">
+                                <Lock className="h-3 w-3" />
+                                ปิดรับแก้ไขแล้ว
+                              </span>
+                            ) : (
+                              <div className="inline-flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditClick(reg)}
+                                  className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                >
+                                  <Edit3 className="h-3 w-3" />
+                                  แก้ไข
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteRegistration(reg)}
+                                  className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                  ลบ
+                                </button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );

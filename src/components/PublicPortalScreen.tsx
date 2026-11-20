@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Lock,
   MapPin,
   RotateCcw,
   Search,
@@ -20,6 +21,9 @@ import {
   SiteSettings,
   TransitionType,
   UserAccount,
+  formatCountdownThai,
+  formatThaiDateTime,
+  getRegistrationStatus,
   isRegistrationComplete,
 } from '../types';
 
@@ -29,6 +33,7 @@ interface PublicPortalScreenProps {
   users: UserAccount[];
   categoryGroups: string[];
   siteSettings: SiteSettings;
+  nowMs: number;
   currentUser: UserAccount | null;
   isGoogleConnected: boolean;
   isSyncing: boolean;
@@ -75,12 +80,17 @@ export const PublicPortalScreen: React.FC<PublicPortalScreenProps> = ({
   users,
   categoryGroups,
   siteSettings,
+  nowMs,
   currentUser,
   isGoogleConnected,
   isSyncing,
   onNavigate,
 }) => {
   const isSystemReady = isGoogleConnected && !isSyncing;
+  const registrationStatus = useMemo(
+    () => getRegistrationStatus(siteSettings, nowMs),
+    [siteSettings, nowMs]
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedLevel, setSelectedLevel] = useState<string>('ALL');
@@ -403,25 +413,49 @@ export const PublicPortalScreen: React.FC<PublicPortalScreenProps> = ({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => onNavigate('login', 'push')}
-                className="whitespace-nowrap rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-800"
-              >
-                เข้าสู่ระบบสำหรับโรงเรียน / ผู้ดูแล
-              </button>
-              <span className="inline-flex items-center gap-2 text-xs text-slate-600">
-                <span
-                  aria-hidden="true"
-                  className={`h-2 w-2 shrink-0 rounded-full ${
-                    isSystemReady ? 'bg-emerald-600' : 'bg-red-600'
-                  }`}
-                />
-                {isSystemReady
-                  ? 'ข้อมูลล่าสุดซิงค์เรียบร้อย · พร้อมใช้งาน (ผู้เยี่ยมชมทั่วไปไม่ต้องล็อกอิน)'
-                  : 'รอโหลดซิ้งข้อมูลจากฐานข้อมูล (ผู้เยี่ยมชมทั่วไปไม่ต้องล็อกอิน)'}
-              </span>
+            <div className="space-y-2.5 pt-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => onNavigate('login', 'push')}
+                  className="whitespace-nowrap rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-800"
+                >
+                  เข้าสู่ระบบสำหรับโรงเรียน / ผู้ดูแล
+                </button>
+                <span className="inline-flex items-center gap-2 text-xs text-slate-600">
+                  <span
+                    aria-hidden="true"
+                    className={`h-2 w-2 shrink-0 rounded-full ${
+                      isSystemReady ? 'bg-emerald-600' : 'bg-red-600'
+                    }`}
+                  />
+                  {isSystemReady
+                    ? 'ข้อมูลล่าสุดซิงค์เรียบร้อย · พร้อมใช้งาน (ผู้เยี่ยมชมทั่วไปไม่ต้องล็อกอิน)'
+                    : 'รอโหลดซิ้งข้อมูลจากฐานข้อมูล (ผู้เยี่ยมชมทั่วไปไม่ต้องล็อกอิน)'}
+                </span>
+              </div>
+
+              {registrationStatus.isClosed ? (
+                <div className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-800">
+                  <Lock className="h-3.5 w-3.5 shrink-0 text-red-700" />
+                  <span>
+                    ปิดรับการลงทะเบียนแล้ว
+                    {registrationStatus.reason === 'scheduled' && registrationStatus.closeAtMs
+                      ? ` (ครบกำหนด ${formatThaiDateTime(registrationStatus.closeAtMs)})`
+                      : ''}
+                  </span>
+                </div>
+              ) : (
+                registrationStatus.reason === 'open_scheduled' && (
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900">
+                    <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700" />
+                    <span>
+                      ปิดรับลงทะเบียนอัตโนมัติ: {formatThaiDateTime(registrationStatus.closeAtMs)}{' '}
+                      (เหลือ {formatCountdownThai(registrationStatus.remainingMs || 0)})
+                    </span>
+                  </div>
+                )
+              )}
             </div>
           </div>
 

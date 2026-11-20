@@ -9,12 +9,17 @@ export const SCREEN_TITLES: Record<ScreenPath, string> = {
   'admin-central': 'จัดการรายการแข่งขัน (ผู้ดูแลระบบ) - ศิลปหัตถกรรมฯ ครั้งที่ 74',
 };
 
+export type RegistrationManualStatus = 'open' | 'closed';
+
 export interface SiteSettings {
   siteTitle: string;
   siteSubtitle: string;
   heroHeading: string;
   heroDescription: string;
   footerText: string;
+  registrationManualStatus?: RegistrationManualStatus;
+  registrationCloseAt?: string; // ISO datetime string for scheduled auto-close
+  registrationClosedMessage?: string;
 }
 
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
@@ -24,7 +29,122 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   heroDescription:
     'ตรวจสอบตารางเวลา สถานที่แข่งขัน กิจกรรมหลัก กิจกรรมย่อย และรายชื่อนักเรียนตัวแทนโรงเรียนที่ส่งเข้าแข่งขัน แยกตามกลุ่มกิจกรรม ระดับชั้น และสถานศึกษา',
   footerText: 'งานศิลปหัตถกรรมนักเรียน ครั้งที่ 74 · ระบบจัดการรายการแข่งขันและลงทะเบียน',
+  registrationManualStatus: 'open',
+  registrationCloseAt: '',
+  registrationClosedMessage: '',
 };
+
+export interface RegistrationStatusInfo {
+  isClosed: boolean;
+  reason: 'manual' | 'scheduled' | 'open_scheduled' | 'open';
+  closeAtMs: number | null;
+  remainingMs: number | null;
+  closedMessage: string;
+}
+
+export function getRegistrationStatus(
+  settings: SiteSettings,
+  nowMs: number = Date.now()
+): RegistrationStatusInfo {
+  const customMsg = (settings.registrationClosedMessage || '').trim();
+  const rawCloseAt = (settings.registrationCloseAt || '').trim();
+  const parsedCloseMs = rawCloseAt ? Date.parse(rawCloseAt) : NaN;
+  const closeAtMs = !Number.isNaN(parsedCloseMs) ? parsedCloseMs : null;
+
+  if (settings.registrationManualStatus === 'closed') {
+    return {
+      isClosed: true,
+      reason: 'manual',
+      closeAtMs,
+      remainingMs: null,
+      closedMessage:
+        customMsg ||
+        'ผู้ดูแลระบบได้สั่งปิดการลงทะเบียนแล้ว ขณะนี้ไม่สามารถส่ง แก้ไข หรือลบข้อมูลการลงทะเบียนได้',
+    };
+  }
+
+  if (closeAtMs !== null) {
+    const remaining = closeAtMs - nowMs;
+    if (remaining <= 0) {
+      return {
+        isClosed: true,
+        reason: 'scheduled',
+        closeAtMs,
+        remainingMs: 0,
+        closedMessage:
+          customMsg ||
+          'หมดเขตการลงทะเบียนตามวันและเวลาที่กำหนดแล้ว ระบบปิดรับการลงทะเบียนโดยอัตโนมัติ',
+      };
+    }
+    return {
+      isClosed: false,
+      reason: 'open_scheduled',
+      closeAtMs,
+      remainingMs: remaining,
+      closedMessage: '',
+    };
+  }
+
+  return {
+    isClosed: false,
+    reason: 'open',
+    closeAtMs: null,
+    remainingMs: null,
+    closedMessage: '',
+  };
+}
+
+export function toDateTimeLocalValue(iso?: string): string {
+  const raw = (iso || '').trim();
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+
+export function fromDateTimeLocalValue(localVal: string): string {
+  const raw = (localVal || '').trim();
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString();
+}
+
+export function formatThaiDateTime(isoOrMs?: string | number | null): string {
+  if (isoOrMs === null || isoOrMs === undefined || isoOrMs === '') return '';
+  const d = typeof isoOrMs === 'number' ? new Date(isoOrMs) : new Date(isoOrMs);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return (
+      new Intl.DateTimeFormat('th-TH', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(d) + ' น.'
+    );
+  } catch {
+    return d.toLocaleString('th-TH');
+  }
+}
+
+export function formatCountdownThai(remainingMs: number): string {
+  if (remainingMs <= 0) return 'หมดเวลาแล้ว';
+  const totalSec = Math.floor(remainingMs / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (days > 0) return `${days} วัน ${hours} ชม. ${minutes} นาที`;
+  if (hours > 0) return `${hours} ชม. ${minutes} นาที ${seconds} วินาที`;
+  if (minutes > 0) return `${minutes} นาที ${seconds} วินาที`;
+  return `${seconds} วินาที`;
+}
 
 export type UserRole = 'admin' | 'school';
 
